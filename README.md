@@ -164,6 +164,14 @@ bash scripts/run_dgx.sh
   ```
 - **Solution**: Link both binaries with `-static-libstdc++ -static-libgcc`. This statically embeds the required standard library routines into the executable, making it completely independent of the system's dynamic `libstdc++` version. `scripts/run_dgx.sh` automatically links with these flags.
 
+#### `unsupported GNU version! gcc versions later than 12 are not supported!`
+- **Cause**: When compiling the hand-written CUDA comparison kernel with `nvcc` (e.g. CUDA 12.0), `nvcc` invokes the default host compiler found in `$PATH` (`/usr/local/bin/g++`, which is GCC 13.1 on some DGX setups). CUDA 12.0 only supports GCC versions up to GCC 12, causing `nvcc` to abort.
+- **Solution**: Pass a supported system host compiler (e.g. `/usr/bin/g++`) to `nvcc` using `-ccbin`. In `scripts/benchmark_dgx.sh`, the variable `NVCC_CCBIN` defaults to `/usr/bin/g++` and can be overridden:
+  ```bash
+  NVCC_CCBIN=/usr/bin/g++ bash scripts/benchmark_dgx.sh
+  ```
+  Note that `miniptxc` and the benchmark harness continue to use the modern `g++` with `-static-libstdc++`; only `nvcc` uses `NVCC_CCBIN`.
+
 ## Source-Line Debug Info & Source Mapping (Phase 4a)
 
 MiniPTX emits standard DWARF-compatible line information using PTX directives:

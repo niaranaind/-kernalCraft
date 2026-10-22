@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build_dgx"
 ARCH="sm_70"
+NVCC_CCBIN="${NVCC_CCBIN:-/usr/bin/g++}"
 
 echo "================================================================="
 echo " MiniPTX Micro-Benchmark Suite: MiniPTX vs. CUDA (Tesla V100)    "
@@ -33,7 +34,19 @@ fi
 
 CUDA_BIN_DIR="$(dirname "$(which nvcc 2>/dev/null || echo "/usr/local/cuda/bin/nvcc")")"
 CUDA_DIR="$(dirname "${CUDA_BIN_DIR}")"
+CUDA_VER="$(nvcc --version | grep "release" | sed -n 's/.*release \([0-9\.]*\).*/\1/p')"
 mkdir -p "${BUILD_DIR}"
+
+echo "Environment:"
+echo "  CUDA Toolkit: ${CUDA_VER} (at ${CUDA_DIR})"
+echo "  Host Compiler (for miniptx): $(which g++ 2>/dev/null) ($(g++ --version 2>&1 | head -n 1))"
+echo "  NVCC Host Compiler (NVCC_CCBIN): ${NVCC_CCBIN}"
+if command -v "${NVCC_CCBIN}" &>/dev/null; then
+    echo "  NVCC Host Compiler Version: $("${NVCC_CCBIN}" --version 2>&1 | head -n 1)"
+else
+    echo "  WARNING: ${NVCC_CCBIN} not found; nvcc may fall back to default PATH compiler."
+fi
+echo
 
 # 2. Build MiniPTX compiler if not already built
 if [ ! -f "${BUILD_DIR}/miniptxc" ]; then
@@ -66,7 +79,14 @@ echo "--- Generating PTX for MiniPTX SAXPY ---"
 "${BUILD_DIR}/miniptxc" "${ROOT_DIR}/examples/saxpy.mk" > "${BUILD_DIR}/miniptx_saxpy.ptx"
 
 echo "--- Compiling hand-written CUDA SAXPY to PTX (nvcc -O3 -arch=${ARCH}) ---"
-nvcc -ptx -arch="${ARCH}" -O3 "${ROOT_DIR}/examples/cuda_saxpy.cu" -o "${BUILD_DIR}/cuda_saxpy.ptx"
+echo "  Executing: nvcc -ccbin \"${NVCC_CCBIN}\" -ptx -arch=\"${ARCH}\" -O3 examples/cuda_saxpy.cu -o build_dgx/cuda_saxpy.ptx"
+if ! nvcc -ccbin "${NVCC_CCBIN}" -ptx -arch="${ARCH}" -O3 "${ROOT_DIR}/examples/cuda_saxpy.cu" -o "${BUILD_DIR}/cuda_saxpy.ptx"; then
+    echo "ERROR: nvcc failed to compile examples/cuda_saxpy.cu." >&2
+    echo "Note: CUDA ${CUDA_VER} supports host GCC versions up to GCC 12." >&2
+    echo "If your default compiler is GCC 13+, specify a supported host compiler via NVCC_CCBIN, e.g.:" >&2
+    echo "  NVCC_CCBIN=/usr/bin/g++ bash scripts/benchmark_dgx.sh" >&2
+    exit 1
+fi
 
 # 5. Run Benchmark on GPU 0
 echo "--- Executing Benchmark on GPU (CUDA_VISIBLE_DEVICES=0) ---"
