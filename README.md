@@ -279,25 +279,43 @@ To evaluate code generation quality, we benchmark MiniPTX against idiomatic hand
 - **Characterization**: Described as "compute-heavy" (rather than strictly arithmetic-bound) because it also loads and stores $N$ elements across global memory.
 - **Fair Comparison**: Identical Driver API loader, launch configuration (256 threads/block, 65,536 blocks), alternating execution, and CPU reference verification.
 
-#### Results on Tesla V100
+#### Results on Tesla V100 (Run 3)
 
 | Implementation | PTX Instructions | SASS Instructions | Median Time (ms) | Throughput (GFLOPS) | Relative Ratio |
 |---|---|---|---|---|---|
-| **MiniPTX** (emitted PTX) | 54 | *Pending rerun* | 0.4424 ms | 4854.5 GFLOPS | 1.121x (12.06% slower) |
-| **CUDA** (`nvcc -O3` PTX) | 28 | *Pending rerun* | 0.3948 ms | 5440.1 GFLOPS | 1.000x (baseline) |
-| **CUDA no-FMA** (`nvcc -O3 --fmad=false`) | 29 | *Pending rerun* | 0.4424 ms | 4854.5 GFLOPS | 1.000x (matches MiniPTX) |
+| **MiniPTX** (emitted PTX) | 54 | 24 | 0.4874 ms | 4405.8 GFLOPS | 1.123x (12.26% slower) |
+| **CUDA** (`nvcc -O3` PTX) | 28 | 32 | 0.4342 ms | 4946.1 GFLOPS | 1.000x (baseline) |
+| **CUDA no-FMA** (`nvcc -O3 --fmad=false`) | 29 | 32 | 0.4884 ms | 4396.5 GFLOPS | 0.998x (0.21% diff) |
+
+#### SASS Opcode & Loop Structure Breakdown (Verified)
+
+| Implementation | Total SASS | FFMA | FMUL | FADD | Loop Structure (Heuristic) |
+|---|---|---|---|---|---|
+| **MiniPTX** (emitted PTX) | 24 | 0 | 1 | 1 | Rolled loop |
+| **CUDA** (`nvcc -O3` PTX) | 32 | 1 | 0 | 0 | Rolled loop |
+| **CUDA no-FMA** (`nvcc -O3 --fmad=false`) | 32 | 0 | 1 | 1 | Rolled loop |
 
 > [!NOTE]
-> **Measured Finding: Hardware FMA Fusion Accounts for the Gap**:
-> - **Empirically Confirmed**: MiniPTX runtime (`0.4424 ms`) matches the `--fmad=false` CUDA control (`0.4424 ms`) exactly (`1.000x`, `4854.5 GFLOPS`).
-> - Default hardware FMA contraction in `nvcc -O3` yields a `10.76%` speedup (`0.3948 ms`, `0.892x`), accounting for the entire `12.06%` difference observed between MiniPTX and default `nvcc -O3`.
-> - Because MiniPTX emits explicit separate `mul.rn.f32` and `add.rn.f32` operations, `ptxas` does not fuse them into `FFMA`, whereas `nvcc` contracts them by default.
->
-> **Measurement Stability on Shared DGX**:
-> Absolute execution times vary slightly across runs on the shared DGX cluster (e.g. `0.4424 ms` vs `0.4721 ms` in an earlier run) due to concurrent GPU activity and background thermal/power states. However, the comparative ratios measured via alternating execution remain remarkably stable (`1.121x` vs `1.122x`).
->
-> **SASS Opcode Confirmation**:
-> Direct confirmation of the underlying machine opcodes (`FFMA` vs `FMUL`/`FADD` counts) and loop unrolling status from the cubin disassembly remains unverified pending execution of the fixed SASS diagnostic script on the DGX.
+> **Key Findings & Performance Analysis**:
+> 1. **FMA Contraction Explains the Gap**:
+>    - MiniPTX emits explicit `mul.rn.f32` and `add.rn.f32` (two separate, dependent operations per iteration: `FMUL` followed by `FADD`).
+>    - Default `nvcc -O3` contracts the multiply and add into a single fused multiply-add instruction (`FFMA`), executing 1 arithmetic operation per loop iteration instead of 2.
+>    - When `nvcc` is compiled with `--fmad=false`, it also emits `FMUL` and `FADD` (0 FFMA, 1 FMUL, 1 FADD), and its runtime matches MiniPTX within measurement noise (`0.4874 ms` vs `0.4884 ms`, a `0.21%` difference).
+>    - Hardware FMA contraction delivers an `11.11%` speedup to `nvcc` (`0.889x`), accounting for the entire observed performance difference.
+> 2. **Loop Unrolling Ruled Out**:
+>    - The SASS inspection confirms all three implementations preserve a rolled loop with 1 backward branch and a single arithmetic sequence per loop. This rules out unrolling as a contributing factor. *(Note: the "rolled/unrolled" check is a heuristic based on instruction and branch counts).*
+> 3. **SASS Instruction Count Does Not Predict Speed**:
+>    - MiniPTX has 24 total SASS instructions while the `--fmad=false` CUDA control has 32, yet both exhibit identical execution time (~0.487 ms - 0.488 ms). Static instruction count does not predict execution speed when loop execution cycles dominate.
+
+#### Multi-Run Measurement Stability (Shared DGX Cluster)
+
+| Run | MiniPTX Time (ms) | CUDA -O3 Time (ms) | CUDA no-FMA Time (ms) | Ratio (MiniPTX / CUDA -O3) | Notes |
+|---|---|---|---|---|---|
+| **Run 1** | 0.4721 ms | 0.4209 ms | N/A | **1.122x** | Initial benchmark, no FMA control |
+| **Run 2** | 0.4424 ms | 0.3948 ms | 0.4424 ms | **1.121x** | Added `--fmad=false` diagnostic |
+| **Run 3** | 0.4874 ms | 0.4342 ms | 0.4884 ms | **1.123x** | Full diagnostic with SASS opcode counts |
+
+Absolute execution times varied across runs on the shared DGX cluster (e.g. MiniPTX between `0.4424 ms` and `0.4874 ms`) due to concurrent user workloads and GPU thermal/power states. However, the comparative ratio between MiniPTX and default CUDA remained remarkably stable at **1.121x – 1.123x**.
 
 ### Running Benchmarks on the DGX
 ```bash
@@ -334,4 +352,4 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on
 - **Phase 2 tests (CPU)**: 25/25 passed (IR verifier, before/after pass tests, safety invariant tests, full pipeline).
 - **Phase 3 tests (CPU)**: 10/10 passed (structural checks, register coverage, branch target checks, instruction format checks, float hex formatting, comparison fusion).
 - **Phase 4a tests (CPU)**: 6/6 passed (lexer column tracking, AST column propagation, PTX `.file`/`.loc` emission, `--map` interleaved mapping, for-loop mapping).
-- **GPU Execution & ptxas (DGX Tesla V100)**: **5/5 tests passed** (Phase 3 & 4a verified, DWARF `.debug_line` and `.nv_debug_line_sass` verified, SAXPY verified at 0.2570 ms / 783.2988 GB/s, compute-heavy verified at 0.4424 ms / 4854.5 GFLOPS matching CUDA --fmad=false control at 1.000x; sanitized log in `docs/dgx_benchmark.log`).
+- **GPU Execution & ptxas (DGX Tesla V100)**: **5/5 tests passed** (Phase 3 & 4a verified, DWARF `.debug_line` and `.nv_debug_line_sass` verified, SAXPY verified at 0.2570 ms / 783.2988 GB/s, compute-heavy verified at 0.4874 ms / 4405.8 GFLOPS matching CUDA --fmad=false control within 0.21% at 0.998x; sanitized log in `docs/dgx_benchmark.log`).
