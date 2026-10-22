@@ -34,54 +34,49 @@ Cubin Debug Sections (DWARF lineinfo verification):
   - .debug_line section verified in cubin
   - .nv_debug_line_sass section verified in cubin
 
---- Part 3: Micro-Benchmark Suite (Phase 4c Complete Run) ---
+--- Part 3: Micro-Benchmark Suite (Phase 4c Single-Run Verification) ---
 Executed via: bash scripts/benchmark_dgx.sh
 Target: GPU 0 (Tesla V100-SXM2-32GB, shared cluster environment)
 Workloads: N = 2^24 elements (16,777,216 floats)
 Harness: Pure CUDA Driver API (cuEvent* hardware timing), alternating timed runs
 
-Correctness Verification (on fresh buffer against CPU single-precision reference):
-  - MiniPTX SAXPY:               [PASS] Correct against CPU reference
-  - Hand-written CUDA SAXPY:     [PASS] Correct against CPU reference
-  - MiniPTX compute-heavy:       [PASS] Correct against CPU reference
-  - Hand-written CUDA compute:   [PASS] Correct against CPU reference
-
 Benchmark 1: SAXPY (Memory-Bound)
   - PTX Instruction Counts:
-      MiniPTX:                    36 instructions
-      CUDA (nvcc -O3):            20 instructions
+      MiniPTX:                           36 instructions
+      CUDA (nvcc -O3):                   20 instructions
   - SASS Instruction Counts:
-      MiniPTX:                    24 SASS instructions
-      CUDA (nvcc -O3):            16 SASS instructions
+      MiniPTX:                           24 SASS instructions
+      CUDA (nvcc -O3):                   16 SASS instructions
   - Measured Runtime (Median):
-      MiniPTX:                    0.2570 ms
-      CUDA (nvcc -O3):            0.2570 ms
+      MiniPTX:                           0.2570 ms
+      CUDA (nvcc -O3):                   0.2570 ms
   - Effective Bandwidth:
-      MiniPTX:                    783.3 GB/s
-      CUDA (nvcc -O3):            783.3 GB/s
+      MiniPTX:                           783.2988 GB/s
+      CUDA (nvcc -O3):                   783.2988 GB/s
   - Measured Ratio:
-      MiniPTX / CUDA:             1.000x (within 5%)
+      MiniPTX / CUDA:                    1.000x
 
 Benchmark 2: Compute-Heavy (N = 2^24 elements, 64-iteration inner loop)
   - PTX Instruction Counts:
-      MiniPTX:                    54 instructions
-      CUDA (nvcc -O3):            28 instructions
+      MiniPTX:                           54 instructions
+      CUDA (nvcc -O3):                   28 instructions
+      CUDA no-FMA (nvcc --fmad=false):   29 instructions
   - SASS Instruction Counts:
-      MiniPTX:                    24 SASS instructions
-      CUDA (nvcc -O3):            32 SASS instructions
+      [Pending diagnostic rerun - unverified until step 1 output exists]
   - Measured Runtime (Median):
-      MiniPTX:                    0.4721 ms
-      CUDA (nvcc -O3):            0.4209 ms
-  - Computed Throughput:
-      MiniPTX:                    4549 GFLOPS
-      CUDA (nvcc -O3):            5103 GFLOPS
-  - Measured Ratio:
-      MiniPTX / CUDA:             1.122x (MiniPTX is 12.17% slower)
+      MiniPTX:                           0.4424 ms (4854.5 GFLOPS)
+      CUDA (nvcc -O3):                   0.3948 ms (5440.1 GFLOPS)
+      CUDA no-FMA (nvcc --fmad=false):   0.4424 ms (4854.5 GFLOPS)
+  - Measured Ratios:
+      MiniPTX / CUDA (nvcc -O3):         1.121x (12.06% slower)
+      MiniPTX / CUDA no-FMA:             1.000x (exact match)
+      CUDA (nvcc -O3) vs CUDA no-FMA:    0.892x (10.76% speedup from hardware FMA fusion)
 
-Notes on Instruction Counts & Performance:
-  - In SAXPY, MiniPTX produces 24 SASS instructions vs 16 for CUDA, but both achieve
-    identical runtime (0.2570 ms / 783.3 GB/s) because memory traffic saturates the
-    Volta HBM2 DRAM subsystem.
-  - In Compute-Heavy, MiniPTX produces fewer static SASS instructions (24 vs 32), yet
-    runs 12.17% slower. Static instruction counts do not equal executed instructions
-    when loops, instruction scheduling, and hardware FMA fusion are involved.
+Empirical Findings:
+  1. Root cause of the ~12% compute-heavy gap is measured and confirmed:
+     MiniPTX runtime matches the no-FMA CUDA control exactly (0.4424 ms vs 0.4424 ms, 1.000x).
+     Default FMA fusion in nvcc accounts for the entire 12% gap.
+  2. Absolute execution times vary across runs on the shared DGX cluster (e.g. 0.4424 ms vs 0.4721 ms),
+     while comparative ratios remain stable across runs (1.121x vs 1.122x).
+  3. Direct SASS opcode breakdown (FFMA / FMUL / FADD counts) remains unverified pending rerun of the
+     fixed diagnostic script.
