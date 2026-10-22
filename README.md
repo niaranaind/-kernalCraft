@@ -352,14 +352,6 @@ nvdisasm -c -g build_dgx/saxpy.cubin
 ```
 *(Verified on DGX Tesla V100: `cuobjdump -elf` confirms both `.debug_line` and `.nv_debug_line_sass` sections are emitted).*
 
-## Roadmap
-- [x] Week 1: lexer, parser, AST, type checker, error messages
-- [x] Week 2: IR lowering, basic blocks, IR printer & verifier, constant folding / DCE / CSE
-- [x] Week 3: PTX emitter, CUDA Driver API runtime, structural golden-file tests, DGX validation script
-- [ ] Week 4: module linker, .loc debug info, benchmark vs hand-written CUDA
-  - [x] Phase 4a: .loc & .file debug info, column tracking, --map source-to-PTX listing
-  - [x] Phase 4c: Micro-benchmarks vs hand-written CUDA (Driver API, CUDA events)
-  - [ ] Phase 4b: Helper functions (`func`), call-graph cycle check, module linker
 
 ## Verification Results
 - **Phase 1 tests (CPU)**: 43/43 passed (lexer, parser, AST shape, precedence, scopes, type checking).
