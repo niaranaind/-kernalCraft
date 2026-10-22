@@ -34,22 +34,54 @@ Cubin Debug Sections (DWARF lineinfo verification):
   - .debug_line section verified in cubin
   - .nv_debug_line_sass section verified in cubin
 
---- Part 3: Micro-Benchmark Suite (Phase 4c) ---
+--- Part 3: Micro-Benchmark Suite (Phase 4c Complete Run) ---
 Executed via: bash scripts/benchmark_dgx.sh
 Target: GPU 0 (Tesla V100-SXM2-32GB, shared cluster environment)
-Workload: SAXPY on N = 2^24 elements (16,777,216 floats, ~128 MiB footprint, 192 MiB DRAM traffic)
-Harness: Pure CUDA Driver API (cuEvent* hardware timing), 10 warmup + 50 alternating timed runs
+Workloads: N = 2^24 elements (16,777,216 floats)
+Harness: Pure CUDA Driver API (cuEvent* hardware timing), alternating timed runs
 
 Correctness Verification (on fresh buffer against CPU single-precision reference):
   - MiniPTX SAXPY:               [PASS] Correct against CPU reference
-  - Hand-written CUDA (nvcc -O3): [PASS] Correct against CPU reference
+  - Hand-written CUDA SAXPY:     [PASS] Correct against CPU reference
+  - MiniPTX compute-heavy:       [PASS] Correct against CPU reference
+  - Hand-written CUDA compute:   [PASS] Correct against CPU reference
 
-PTX Instruction Counts:
-  - MiniPTX emitted PTX:          36 instructions
-  - Hand-written CUDA (nvcc -O3): 20 instructions
+Benchmark 1: SAXPY (Memory-Bound)
+  - PTX Instruction Counts:
+      MiniPTX:                    36 instructions
+      CUDA (nvcc -O3):            20 instructions
+  - SASS Instruction Counts:
+      MiniPTX:                    24 SASS instructions
+      CUDA (nvcc -O3):            16 SASS instructions
+  - Measured Runtime (Median):
+      MiniPTX:                    0.2570 ms
+      CUDA (nvcc -O3):            0.2570 ms
+  - Effective Bandwidth:
+      MiniPTX:                    783.3 GB/s
+      CUDA (nvcc -O3):            783.3 GB/s
+  - Measured Ratio:
+      MiniPTX / CUDA:             1.000x (within 5%)
 
-Measured Runtime & Bandwidth (Tesla V100, GPU 0, 50 alternating iterations):
-  - MiniPTX Median Time:          0.2560 ms
-  - Hand-written CUDA Median Time: 0.2560 ms
-  - Effective Bandwidth:          ~786 GB/s
-  - Measured Ratio (MiniPTX/CUDA): 1.000x (matches within 5%)
+Benchmark 2: Compute-Heavy (N = 2^24 elements, 64-iteration inner loop)
+  - PTX Instruction Counts:
+      MiniPTX:                    54 instructions
+      CUDA (nvcc -O3):            28 instructions
+  - SASS Instruction Counts:
+      MiniPTX:                    24 SASS instructions
+      CUDA (nvcc -O3):            32 SASS instructions
+  - Measured Runtime (Median):
+      MiniPTX:                    0.4721 ms
+      CUDA (nvcc -O3):            0.4209 ms
+  - Computed Throughput:
+      MiniPTX:                    4549 GFLOPS
+      CUDA (nvcc -O3):            5103 GFLOPS
+  - Measured Ratio:
+      MiniPTX / CUDA:             1.122x (MiniPTX is 12.17% slower)
+
+Notes on Instruction Counts & Performance:
+  - In SAXPY, MiniPTX produces 24 SASS instructions vs 16 for CUDA, but both achieve
+    identical runtime (0.2570 ms / 783.3 GB/s) because memory traffic saturates the
+    Volta HBM2 DRAM subsystem.
+  - In Compute-Heavy, MiniPTX produces fewer static SASS instructions (24 vs 32), yet
+    runs 12.17% slower. Static instruction counts do not equal executed instructions
+    when loops, instruction scheduling, and hardware FMA fusion are involved.
