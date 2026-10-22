@@ -2,11 +2,14 @@
 #
 # MiniPTX vs Hand-Written CUDA Benchmark Runner
 #
-# Target: Tesla V100 (sm_70) on DGX Server
-# Workload: SAXPY on N = 2^24 elements (128 MiB footprint, 192 MiB traffic)
+# Target: Tesla V100-SXM2 (sm_70) on DGX Server
+# Workloads:
+#   1. SAXPY: N = 2^24 elements (128 MiB footprint, 192 MiB DRAM traffic) - Memory-Bound
+#   2. Compute-Heavy: N = 2^24 elements, 64-iteration inner FMA loop - Arithmetic-Bound
 #
 # Usage:
 #   bash scripts/benchmark_dgx.sh
+#   NVCC_CCBIN=/usr/bin/g++ bash scripts/benchmark_dgx.sh
 #
 
 set -e
@@ -31,6 +34,14 @@ if ! command -v g++ &> /dev/null; then
     echo "ERROR: g++ not found in PATH." >&2
     exit 1
 fi
+if ! command -v ptxas &> /dev/null; then
+    echo "ERROR: ptxas not found in PATH." >&2
+    exit 1
+fi
+if ! command -v cuobjdump &> /dev/null; then
+    echo "ERROR: cuobjdump not found in PATH." >&2
+    exit 1
+fi
 
 CUDA_BIN_DIR="$(dirname "$(which nvcc 2>/dev/null || echo "/usr/local/cuda/bin/nvcc")")"
 CUDA_DIR="$(dirname "${CUDA_BIN_DIR}")"
@@ -48,20 +59,18 @@ else
 fi
 echo
 
-# 2. Build MiniPTX compiler if not already built
-if [ ! -f "${BUILD_DIR}/miniptxc" ]; then
-    echo "--- Building miniptxc ---"
-    g++ -O3 -std=c++17 -Wall -Wextra -Wpedantic \
-        -static-libstdc++ -static-libgcc \
-        -I"${ROOT_DIR}/include" \
-        "${ROOT_DIR}/src/lexer.cpp" \
-        "${ROOT_DIR}/src/parser.cpp" \
-        "${ROOT_DIR}/src/ast.cpp" \
-        "${ROOT_DIR}/src/ir.cpp" \
-        "${ROOT_DIR}/src/ptx_emitter.cpp" \
-        "${ROOT_DIR}/src/main.cpp" \
-        -o "${BUILD_DIR}/miniptxc"
-fi
+# 2. Build MiniPTX compiler if not already built or outdated
+echo "--- Compiling miniptxc ---"
+g++ -O3 -std=c++17 -Wall -Wextra -Wpedantic \
+    -static-libstdc++ -static-libgcc \
+    -I"${ROOT_DIR}/include" \
+    "${ROOT_DIR}/src/lexer.cpp" \
+    "${ROOT_DIR}/src/parser.cpp" \
+    "${ROOT_DIR}/src/ast.cpp" \
+    "${ROOT_DIR}/src/ir.cpp" \
+    "${ROOT_DIR}/src/ptx_emitter.cpp" \
+    "${ROOT_DIR}/src/main.cpp" \
+    -o "${BUILD_DIR}/miniptxc"
 
 # 3. Build benchmark executable with CUDA Driver API
 echo "--- Compiling pure CUDA Driver API benchmark harness ---"
@@ -74,7 +83,7 @@ g++ -O3 -std=c++17 -Wall -Wextra -Wpedantic \
     -lcuda \
     -o "${BUILD_DIR}/benchmark"
 
-# 4. Generate PTX for both kernels
+# 4. Generate PTX for SAXPY (Memory-Bound)
 echo "--- Generating PTX for MiniPTX SAXPY ---"
 "${BUILD_DIR}/miniptxc" "${ROOT_DIR}/examples/saxpy.mk" > "${BUILD_DIR}/miniptx_saxpy.ptx"
 
@@ -88,7 +97,66 @@ if ! nvcc -ccbin "${NVCC_CCBIN}" -ptx -arch="${ARCH}" -O3 "${ROOT_DIR}/examples/
     exit 1
 fi
 
-# 5. Run Benchmark on GPU 0
+# 5. Generate PTX for Compute-Heavy (Arithmetic-Bound)
+echo "--- Generating PTX for MiniPTX Compute-Heavy ---"
+"${BUILD_DIR}/miniptxc" "${ROOT_DIR}/examples/compute_heavy.mk" > "${BUILD_DIR}/miniptx_compute_heavy.ptx"
+
+echo "--- Compiling hand-written CUDA Compute-Heavy to PTX (nvcc -O3 -arch=${ARCH}) ---"
+echo "  Executing: nvcc -ccbin \"${NVCC_CCBIN}\" -ptx -arch=\"${ARCH}\" -O3 examples/cuda_compute_heavy.cu -o build_dgx/cuda_compute_heavy.ptx"
+if ! nvcc -ccbin "${NVCC_CCBIN}" -ptx -arch="${ARCH}" -O3 "${ROOT_DIR}/examples/cuda_compute_heavy.cu" -o "${BUILD_DIR}/cuda_compute_heavy.ptx"; then
+    echo "ERROR: nvcc failed to compile examples/cuda_compute_heavy.cu." >&2
+    echo "Note: CUDA ${CUDA_VER} supports host GCC versions up to GCC 12." >&2
+    echo "If your default compiler is GCC 13+, specify a supported host compiler via NVCC_CCBIN, e.g.:" >&2
+    echo "  NVCC_CCBIN=/usr/bin/g++ bash scripts/benchmark_dgx.sh" >&2
+    exit 1
+fi
+
+# 6. Run Benchmark on GPU 0
+echo
 echo "--- Executing Benchmark on GPU (CUDA_VISIBLE_DEVICES=0) ---"
 export CUDA_VISIBLE_DEVICES=0
-"${BUILD_DIR}/benchmark" "${BUILD_DIR}/miniptx_saxpy.ptx" "${BUILD_DIR}/cuda_saxpy.ptx"
+"${BUILD_DIR}/benchmark" "${BUILD_DIR}"
+
+# 7. SASS Disassembly & Machine Instruction Comparison
+echo
+echo "================================================================="
+echo " SASS Disassembly & Machine Instruction Comparison               "
+echo "================================================================="
+echo
+
+echo "--- Assembling PTX to CUBIN with ptxas ---"
+ptxas -m64 -arch="${ARCH}" "${BUILD_DIR}/miniptx_saxpy.ptx" -o "${BUILD_DIR}/miniptx_saxpy.cubin"
+ptxas -m64 -arch="${ARCH}" "${BUILD_DIR}/cuda_saxpy.ptx" -o "${BUILD_DIR}/cuda_saxpy.cubin"
+ptxas -m64 -arch="${ARCH}" "${BUILD_DIR}/miniptx_compute_heavy.ptx" -o "${BUILD_DIR}/miniptx_compute_heavy.cubin"
+ptxas -m64 -arch="${ARCH}" "${BUILD_DIR}/cuda_compute_heavy.ptx" -o "${BUILD_DIR}/cuda_compute_heavy.cubin"
+
+count_sass_instructions() {
+    local cubin="$1"
+    if [ ! -f "${cubin}" ]; then
+        echo "0"
+        return
+    fi
+    # cuobjdump -sass outputs instruction lines with /*offset*/ followed by mnemonic and ending with ;
+    cuobjdump -sass "${cubin}" 2>/dev/null | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -c ';' || echo "0"
+}
+
+SAXPY_MINIPTX_SASS="$(count_sass_instructions "${BUILD_DIR}/miniptx_saxpy.cubin")"
+SAXPY_CUDA_SASS="$(count_sass_instructions "${BUILD_DIR}/cuda_saxpy.cubin")"
+COMPUTE_MINIPTX_SASS="$(count_sass_instructions "${BUILD_DIR}/miniptx_compute_heavy.cubin")"
+COMPUTE_CUDA_SASS="$(count_sass_instructions "${BUILD_DIR}/cuda_compute_heavy.cubin")"
+
+echo "SASS Instruction Counts (sm_70 machine instructions via cuobjdump -sass):"
+echo "  Benchmark 1 - SAXPY:"
+echo "    - MiniPTX:                    ${SAXPY_MINIPTX_SASS} SASS instructions"
+echo "    - Hand-written CUDA (nvcc -O3): ${SAXPY_CUDA_SASS} SASS instructions"
+echo "  Benchmark 2 - Compute-Heavy:"
+echo "    - MiniPTX:                    ${COMPUTE_MINIPTX_SASS} SASS instructions"
+echo "    - Hand-written CUDA (nvcc -O3): ${COMPUTE_CUDA_SASS} SASS instructions"
+echo
+echo "Why PTX Instruction Counts Differ:"
+echo "  The MiniPTX IR generates explicit temporary register 'mov' copies for operand"
+echo "  passing, variable slot reads/writes, and parameter forwarding. In contrast, nvcc"
+echo "  directly emits optimized PTX patterns. However, when ptxas compiles PTX into SASS,"
+echo "  its register allocator and copy-coalescing passes eliminate these redundant mov"
+echo "  copies, bringing the actual hardware instruction count much closer together."
+echo "================================================================="
