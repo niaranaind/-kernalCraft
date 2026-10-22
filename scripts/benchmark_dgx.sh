@@ -142,36 +142,36 @@ count_sass_instructions() {
         echo "0"
         return
     fi
-    cuobjdump -sass "${cubin}" 2>/dev/null | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -c ';' || echo "0"
+    cuobjdump -sass "${cubin}" 2>/dev/null | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep ';' | wc -l | tr -d ' '
 }
 
 analyze_compute_cubin() {
     local cubin="$1"
     local label="$2"
     if [ ! -f "${cubin}" ]; then
-        echo "  ${label}: file not found"
+        echo "  ${label}: file not found (${cubin})"
         return
     fi
 
     local sass
-    sass="$(cuobjdump -sass "${cubin}" 2>/dev/null)"
+    sass="$(cuobjdump -sass "${cubin}" 2>/dev/null || true)"
 
     local total_sass
-    total_sass="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -c ';' || echo 0)"
+    total_sass="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep ';' | wc -l | tr -d ' ')"
 
     local ffma_count
-    ffma_count="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -iE '\bFFMA(\.[A-Z0-9_]+)*\b' | grep -c ';' || echo 0)"
+    ffma_count="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -iE '\bFFMA(\.[A-Z0-9_]+)*\b' | grep ';' | wc -l | tr -d ' ')"
 
     local fmul_count
-    fmul_count="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -iE '\bFMUL(\.[A-Z0-9_]+)*\b' | grep -c ';' || echo 0)"
+    fmul_count="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -iE '\bFMUL(\.[A-Z0-9_]+)*\b' | grep ';' | wc -l | tr -d ' ')"
 
     local fadd_count
-    fadd_count="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -iE '\bFADD(\.[A-Z0-9_]+)*\b' | grep -c ';' || echo 0)"
+    fadd_count="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -iE '\bFADD(\.[A-Z0-9_]+)*\b' | grep ';' | wc -l | tr -d ' ')"
 
     local bra_count
-    bra_count="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -iE '\bBRA(\.[A-Z0-9_]+)*\b' | grep -c ';' || echo 0)"
+    bra_count="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -iE '\bBRA(\.[A-Z0-9_]+)*\b' | grep ';' | wc -l | tr -d ' ')"
 
-    local math_total=$((ffma_count + fmul_count + fadd_count))
+    local math_total="$(( ${ffma_count:-0} + ${fmul_count:-0} + ${fadd_count:-0} ))"
     local unroll_info="Rolled loop (unroll factor 1: ${math_total} float op(s) in body, ${bra_count} branch(es))"
     if [ "${bra_count}" -eq 0 ] && [ "${math_total}" -ge 32 ]; then
         unroll_info="Fully unrolled (${math_total} float ops, no backward branch)"
@@ -195,10 +195,4 @@ analyze_compute_cubin "${BUILD_DIR}/miniptx_compute_heavy.cubin"       "MiniPTX 
 analyze_compute_cubin "${BUILD_DIR}/cuda_compute_heavy.cubin"          "CUDA (nvcc -O3)"
 analyze_compute_cubin "${BUILD_DIR}/cuda_compute_heavy_nofma.cubin"    "CUDA no-FMA (nvcc -O3 --fmad=false)"
 echo
-echo "Methodology Note on Instruction Counts:"
-echo "  - In SAXPY: MiniPTX produces 24 SASS instructions vs 16 for CUDA, but both achieve"
-echo "    identical runtime because DRAM bandwidth is fully saturated."
-echo "  - In Compute-Heavy: MiniPTX produces 24 SASS instructions vs 32 for CUDA, yet MiniPTX"
-echo "    runs slower. Static instruction counts do not equal dynamically executed instructions"
-echo "    when loops, instruction scheduling, and hardware FMA fusion are involved."
 echo "================================================================="
