@@ -110,7 +110,7 @@ MiniPTX runs an optimization pipeline: `Constant Folding -> DCE -> CSE -> DCE`.
    - **Safety rules**: Never folds division by zero. Never folds `INT_MIN / -1` (prevents UB and hardware faults). Evaluates floats strictly in `float` precision and skips NaN / infinity results.
 2. **Dead Code Elimination (DCE)**:
    - Eliminates unused expression temporaries.
-   - Cascades iteratively until a fixed point (e.g. deleting an unused operation makes its operands unused, removing them on the next pass).
+   - Cascades iteratively until a fixed point.
    - **Safety rules**: Never deletes `store` instructions (global memory side-effects) and never deletes `mov` instructions into variable slots.
 3. **Common Subexpression Elimination (CSE)**:
    - Identifies duplicate computations in the same basic block and replaces subsequent occurrences with a copy of the initial result.
@@ -120,21 +120,61 @@ MiniPTX runs an optimization pipeline: `Constant Folding -> DCE -> CSE -> DCE`.
    - Runs automatically after lowering and after every optimization pass.
    - Asserts that every block has exactly one terminator (`br`, `condbr`, `ret`), no terminator occurs mid-block, every operand is defined before use, branch targets exist, `condbr` conditions are `i32`, and instruction operand/result types strictly match.
 
-## Build
-    cmake -S . -B build && cmake --build build && ctest --test-dir build
+## PTX Back End & GPU Execution
+
+### Target Architecture & Version
+- Target: `.target sm_70` (NVIDIA Volta / Tesla V100 on DGX).
+- Default PTX ISA: `.version 6.0` (defined as a named constant in `ptx_emitter.hpp`).
+- Address Size: `.address_size 64` (64-bit pointers).
+
+#### Checking and Changing PTX / CUDA Version on your DGX
+1. On your DGX, check your CUDA version:
+   ```bash
+   nvcc --version
+   nvidia-smi
+   ```
+2. In `include/miniptx/ptx_emitter.hpp`, the constant `DEFAULT_PTX_VERSION` is set to `"6.0"`. Volta (sm_70) requires PTX ISA 6.0 or newer. If you are using a newer CUDA release (e.g. CUDA 11 or 12) and wish to target a higher PTX version, you can change `DEFAULT_PTX_VERSION` or pass `EmitterOptions{ "7.0", "sm_70" }`.
+
+### Emitted PTX Characteristics
+- **Registers**: Virtual register classes `.reg .b32 %r<N>`, `.reg .f32 %f<N>`, `.reg .b64 %rd<N>`, and `.reg .pred %p<N>`. Declared bounds strictly encompass all register indices used in the body.
+- **Arithmetic**:
+  - Integer multiply: `mul.lo.s32`
+  - Float arithmetic: uses `.rn` (round-to-nearest-even) explicitly: `add.rn.f32`, `sub.rn.f32`, `mul.rn.f32`, `div.rn.f32` to prevent unintended FMA fusion.
+  - Float inequality: uses `setp.neu.f32` (not equal or unordered) to match C NaN behavior.
+  - Float literals: emitted in exact IEEE 754 hex format (`0fHHHHHHHH`), preventing decimal round-trip issues.
+- **Memory Addressing**:
+  - Pointers loaded from `.param` space are converted with `cvta.to.global.u64`.
+  - Element addressing `ptr[idx]` uses `mul.wide.s32 %rd0, %r_idx, 4` followed by `add.s64 %rd0, %rd_ptr, %rd0` and `ld.global` / `st.global`.
+- **Branch Optimization**:
+  - Comparison temporaries used exclusively by `condbr` are fused directly into predicate registers without materializing into integer registers with `selp`.
+  - If a branch target is the next block in sequential order, the unconditional jump is omitted and allowed to fall through.
+
+### Running on the DGX
+To build the compiler, assemble with `ptxas`, and execute all 5 kernels on the Tesla V100 with the CUDA Driver API:
+```bash
+bash scripts/run_dgx.sh
+```
+
+## Build & Test Locally (macOS)
+```bash
+cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure
+```
 
 ## Usage
-    ./build/miniptxc examples/saxpy.mk           # compile to PTX (stdout)
-    ./build/miniptxc --dump-ast examples/saxpy.mk # print the AST
-    ./build/miniptxc --dump-ir examples/saxpy.mk  # print the optimized IR
+```bash
+./build/miniptxc examples/saxpy.mk           # compile to PTX (stdout)
+./build/miniptxc --dump-ast examples/saxpy.mk # print the AST
+./build/miniptxc --dump-ir examples/saxpy.mk  # print the optimized IR
+```
 
 ## Roadmap
 - [x] Week 1: lexer, parser, AST, type checker, error messages
 - [x] Week 2: IR lowering, basic blocks, IR printer & verifier, constant folding / DCE / CSE
-- [ ] Week 3: PTX emitter, run on GPU, CPU-reference tests
+- [x] Week 3: PTX emitter, CUDA Driver API runtime, structural golden-file tests, DGX validation script
 - [ ] Week 4: module linker, .loc debug info, benchmark vs hand-written CUDA
 
-## Results
-- **Phase 1 tests**: 43/43 passed (lexer, parser, AST shape, precedence, scopes, type checking).
-- **Phase 2 tests**: 25/25 passed (IR verifier, before/after pass tests, safety invariant tests, full pipeline).
-- **Example kernels**: saxpy, vecadd, scale, ewmax, fill all compile, lower, and optimize cleanly.
+## Verification Results
+- **Phase 1 tests (CPU)**: 43/43 passed (lexer, parser, AST shape, precedence, scopes, type checking).
+- **Phase 2 tests (CPU)**: 25/25 passed (IR verifier, before/after pass tests, safety invariant tests, full pipeline).
+- **Phase 3 tests (CPU)**: 10/10 passed (structural checks, register coverage, branch target checks, instruction format checks, float hex formatting, comparison fusion).
+- **GPU Execution & ptxas**: **Unverified on macOS** (no NVIDIA GPU or ptxas installed locally). Complete code and automated test script `scripts/run_dgx.sh` provided for execution on your DGX Tesla V100.
