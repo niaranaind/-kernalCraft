@@ -11,11 +11,14 @@
 int main(int argc, char** argv) {
     // --- Parse command-line flags ---
     bool dump_ast = false;
+    bool dump_ir = false;
     const char* filename = nullptr;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--dump-ast") == 0) {
             dump_ast = true;
+        } else if (std::strcmp(argv[i], "--dump-ir") == 0) {
+            dump_ir = true;
         } else if (argv[i][0] != '-') {
             filename = argv[i];
         } else {
@@ -25,7 +28,7 @@ int main(int argc, char** argv) {
     }
 
     if (!filename) {
-        std::cerr << "usage: miniptxc [--dump-ast] <kernel.mk>\n";
+        std::cerr << "usage: miniptxc [--dump-ast] [--dump-ir] <kernel.mk>\n";
         return 1;
     }
 
@@ -50,8 +53,16 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        // Phase 2+: IR lowering and PTX emission (stubs for now)
-        miniptx::lower_and_optimize();
+        // Phase 2: Lower to IR and optimize
+        auto ir_fn = miniptx::lower_to_ir(kernel);
+        miniptx::optimize(ir_fn);
+
+        if (dump_ir) {
+            miniptx::dump_ir(ir_fn);
+            return 0;
+        }
+
+        // Phase 3+: PTX emission (stub for now)
         std::cout << miniptx::emit_ptx();
 
     } catch (const std::runtime_error& e) {
