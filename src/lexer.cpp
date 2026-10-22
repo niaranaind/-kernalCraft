@@ -43,6 +43,7 @@ const char* tok_name(Tok k) {
 std::vector<Token> lex(const std::string& src) {
     std::vector<Token> tokens;
     int line = 1;                 // Current line number (1-based)
+    int col = 1;                  // Current column number (1-based)
     size_t i = 0;                 // Current position in the source string
     const size_t n = src.size();
 
@@ -51,7 +52,14 @@ std::vector<Token> lex(const std::string& src) {
 
         // --- Skip whitespace, tracking newlines for line numbers ---
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-            if (c == '\n') ++line;
+            if (c == '\n') {
+                ++line;
+                col = 1;
+            } else if (c == '\t') {
+                col += 4;
+            } else {
+                ++col;
+            }
             ++i;
             continue;
         }
@@ -59,16 +67,26 @@ std::vector<Token> lex(const std::string& src) {
         // --- Skip // line comments ---
         if (c == '/' && i + 1 < n && src[i + 1] == '/') {
             i += 2;
-            while (i < n && src[i] != '\n') ++i;
+            col += 2;
+            while (i < n && src[i] != '\n') {
+                ++i;
+                ++col;
+            }
             // Don't skip the newline itself; the loop above will count it.
             continue;
         }
+
+        int tok_line = line;
+        int tok_col = col;
 
         // --- Identifiers and keywords ---
         // Start with a letter or underscore, continue with letters, digits, or _.
         if (std::isalpha(c) || c == '_') {
             size_t start = i;
-            while (i < n && (std::isalnum(src[i]) || src[i] == '_')) ++i;
+            while (i < n && (std::isalnum(src[i]) || src[i] == '_')) {
+                ++i;
+                ++col;
+            }
             std::string word = src.substr(start, i - start);
 
             // Check if the identifier is actually a keyword.
@@ -80,7 +98,7 @@ std::vector<Token> lex(const std::string& src) {
             else if (word == "int")    kind = Tok::Int;
             else if (word == "float")  kind = Tok::Float;
 
-            tokens.push_back({kind, std::move(word), line});
+            tokens.push_back({kind, std::move(word), tok_line, tok_col});
             continue;
         }
 
@@ -88,15 +106,22 @@ std::vector<Token> lex(const std::string& src) {
         // We scan digits, then check for a '.' to decide int vs float.
         if (std::isdigit(c)) {
             size_t start = i;
-            while (i < n && std::isdigit(src[i])) ++i;
+            while (i < n && std::isdigit(src[i])) {
+                ++i;
+                ++col;
+            }
 
             // If there's a dot followed by a digit, it's a float literal.
             if (i < n && src[i] == '.' && i + 1 < n && std::isdigit(src[i + 1])) {
                 ++i;  // skip the dot
-                while (i < n && std::isdigit(src[i])) ++i;
-                tokens.push_back({Tok::FloatLit, src.substr(start, i - start), line});
+                ++col;
+                while (i < n && std::isdigit(src[i])) {
+                    ++i;
+                    ++col;
+                }
+                tokens.push_back({Tok::FloatLit, src.substr(start, i - start), tok_line, tok_col});
             } else {
-                tokens.push_back({Tok::IntLit, src.substr(start, i - start), line});
+                tokens.push_back({Tok::IntLit, src.substr(start, i - start), tok_line, tok_col});
             }
             continue;
         }
@@ -106,10 +131,10 @@ std::vector<Token> lex(const std::string& src) {
         // scanned as "<" followed by "=".
         if (i + 1 < n) {
             std::string two = src.substr(i, 2);
-            if (two == "<=") { tokens.push_back({Tok::Le, "<=", line}); i += 2; continue; }
-            if (two == ">=") { tokens.push_back({Tok::Ge, ">=", line}); i += 2; continue; }
-            if (two == "==") { tokens.push_back({Tok::Eq, "==", line}); i += 2; continue; }
-            if (two == "!=") { tokens.push_back({Tok::Ne, "!=", line}); i += 2; continue; }
+            if (two == "<=") { tokens.push_back({Tok::Le, "<=", tok_line, tok_col}); i += 2; col += 2; continue; }
+            if (two == ">=") { tokens.push_back({Tok::Ge, ">=", tok_line, tok_col}); i += 2; col += 2; continue; }
+            if (two == "==") { tokens.push_back({Tok::Eq, "==", tok_line, tok_col}); i += 2; col += 2; continue; }
+            if (two == "!=") { tokens.push_back({Tok::Ne, "!=", tok_line, tok_col}); i += 2; col += 2; continue; }
         }
 
         // --- Single-character tokens ---
@@ -136,12 +161,13 @@ std::vector<Token> lex(const std::string& src) {
                     "line " + std::to_string(line) + ": unexpected character '" +
                     std::string(1, c) + "'");
         }
-        tokens.push_back({kind, std::string(1, c), line});
+        tokens.push_back({kind, std::string(1, c), tok_line, tok_col});
         ++i;
+        ++col;
     }
 
     // Always end with an Eof token so the parser can check for end-of-input.
-    tokens.push_back({Tok::Eof, "", line});
+    tokens.push_back({Tok::Eof, "", line, col});
     return tokens;
 }
 

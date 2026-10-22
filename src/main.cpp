@@ -12,6 +12,8 @@ int main(int argc, char** argv) {
     // --- Parse command-line flags ---
     bool dump_ast = false;
     bool dump_ir = false;
+    bool show_map = false;
+    bool emit_line_info = true;
     const char* filename = nullptr;
 
     for (int i = 1; i < argc; ++i) {
@@ -19,6 +21,12 @@ int main(int argc, char** argv) {
             dump_ast = true;
         } else if (std::strcmp(argv[i], "--dump-ir") == 0) {
             dump_ir = true;
+        } else if (std::strcmp(argv[i], "--map") == 0) {
+            show_map = true;
+        } else if (std::strcmp(argv[i], "-g") == 0 || std::strcmp(argv[i], "--lineinfo") == 0) {
+            emit_line_info = true;
+        } else if (std::strcmp(argv[i], "--no-lineinfo") == 0) {
+            emit_line_info = false;
         } else if (argv[i][0] != '-') {
             filename = argv[i];
         } else {
@@ -28,7 +36,7 @@ int main(int argc, char** argv) {
     }
 
     if (!filename) {
-        std::cerr << "usage: miniptxc [--dump-ast] [--dump-ir] <kernel.mk>\n";
+        std::cerr << "usage: miniptxc [--dump-ast] [--dump-ir] [--map] [-g] [--no-lineinfo] <kernel.mk>\n";
         return 1;
     }
 
@@ -62,8 +70,17 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        // Phase 3: Emit PTX assembly
-        std::cout << miniptx::emit_ptx(ir_fn);
+        miniptx::EmitterOptions options;
+        options.emit_line_info = emit_line_info;
+        options.source_filename = filename;
+
+        if (show_map) {
+            std::cout << miniptx::emit_ptx_map(ir_fn, source, options);
+            return 0;
+        }
+
+        // Phase 3 & 4: Emit PTX assembly (with debug lineinfo if enabled)
+        std::cout << miniptx::emit_ptx(ir_fn, options);
 
     } catch (const std::runtime_error& e) {
         std::cerr << "error: " << e.what() << "\n";

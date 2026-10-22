@@ -31,6 +31,10 @@ int Expr::line() const {
     return std::visit([](const auto& n) -> int { return n.line; }, node);
 }
 
+int Expr::col() const {
+    return std::visit([](const auto& n) -> int { return n.col; }, node);
+}
+
 // ============================================================================
 // AST printer  (--dump-ast)
 // ============================================================================

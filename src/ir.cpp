@@ -344,6 +344,9 @@ public:
 
     IRFunction lower() {
         fn_.name = ast_.name;
+        fn_.entry_line = ast_.line;
+        fn_.entry_col = ast_.col;
+        fn_.end_line = ast_.end_line;
 
         // Entry block BB0
         create_block("BB0");
@@ -364,6 +367,7 @@ public:
             mov.dest = slot;
             mov.args = {param_temp};
             mov.line = ast_.line;
+            mov.col = ast_.col;
             emit(mov);
         }
 
@@ -375,7 +379,8 @@ public:
         if (cur_block().instrs.empty() || !is_terminator(cur_block().instrs.back().op)) {
             Instruction ret;
             ret.op = IROp::Ret;
-            ret.line = ast_.line;
+            ret.line = ast_.end_line;
+            ret.col = 1;
             emit(ret);
         }
 
@@ -444,6 +449,7 @@ private:
                 inst.dest = dest;
                 inst.int_val = n.value;
                 inst.line = n.line;
+                inst.col = n.col;
                 emit(inst);
                 return dest;
 
@@ -455,6 +461,7 @@ private:
                 inst.dest = dest;
                 inst.float_val = n.value;
                 inst.line = n.line;
+                inst.col = n.col;
                 emit(inst);
                 return dest;
 
@@ -467,6 +474,7 @@ private:
                 inst.dest = dest;
                 inst.args = {slot};
                 inst.line = n.line;
+                inst.col = n.col;
                 emit(inst);
                 return dest;
 
@@ -496,6 +504,7 @@ private:
                 inst.dest = dest;
                 inst.args = {lhs, rhs};
                 inst.line = n.line;
+                inst.col = n.col;
                 emit(inst);
                 return dest;
 
@@ -508,6 +517,7 @@ private:
                 inst.dest = dest;
                 inst.args = {operand};
                 inst.line = n.line;
+                inst.col = n.col;
                 emit(inst);
                 return dest;
 
@@ -520,6 +530,7 @@ private:
                 mov_ptr.dest = ptr_temp;
                 mov_ptr.args = {slot};
                 mov_ptr.line = n.line;
+                mov_ptr.col = n.col;
                 emit(mov_ptr);
 
                 Value idx = lower_expr(*n.index);
@@ -532,6 +543,7 @@ private:
                 load_inst.dest = dest;
                 load_inst.args = {ptr_temp, idx};
                 load_inst.line = n.line;
+                load_inst.col = n.col;
                 emit(load_inst);
                 return dest;
 
@@ -543,6 +555,7 @@ private:
                 inst.dest = dest;
                 inst.builtin_name = n.name;
                 inst.line = n.line;
+                inst.col = n.col;
                 emit(inst);
                 return dest;
             }
@@ -570,6 +583,7 @@ private:
                 mov.dest = slot;
                 mov.args = {init_val};
                 mov.line = n.line;
+                mov.col = n.col;
                 emit(mov);
 
             } else if constexpr (std::is_same_v<T, AssignStmt>) {
@@ -582,6 +596,7 @@ private:
                 mov.dest = slot;
                 mov.args = {val};
                 mov.line = n.line;
+                mov.col = n.col;
                 emit(mov);
 
             } else if constexpr (std::is_same_v<T, IndexAssignStmt>) {
@@ -593,6 +608,7 @@ private:
                 mov_ptr.dest = ptr_temp;
                 mov_ptr.args = {slot};
                 mov_ptr.line = n.line;
+                mov_ptr.col = n.col;
                 emit(mov_ptr);
 
                 Value idx = lower_expr(*n.index);
@@ -603,6 +619,7 @@ private:
                 store_inst.type = Type{slot.type.base, false};
                 store_inst.args = {ptr_temp, idx, val};
                 store_inst.line = n.line;
+                store_inst.col = n.col;
                 emit(store_inst);
 
             } else if constexpr (std::is_same_v<T, IfStmt>) {
@@ -619,6 +636,7 @@ private:
                 cond_br.then_block = fn_.blocks[then_idx].label;
                 cond_br.else_block = n.else_body.empty() ? fn_.blocks[merge_idx].label : fn_.blocks[else_idx].label;
                 cond_br.line = n.line;
+                cond_br.col = n.col;
                 emit(cond_br);
 
                 // Lower then branch
@@ -631,6 +649,7 @@ private:
                     br.op = IROp::Br;
                     br.target_block = fn_.blocks[merge_idx].label;
                     br.line = n.line;
+                    br.col = n.col;
                     emit(br);
                 }
 
@@ -645,6 +664,7 @@ private:
                         br.op = IROp::Br;
                         br.target_block = fn_.blocks[merge_idx].label;
                         br.line = n.line;
+                        br.col = n.col;
                         emit(br);
                     }
                 }
@@ -664,6 +684,7 @@ private:
                 init_mov.dest = slot;
                 init_mov.args = {init_val};
                 init_mov.line = n.line;
+                init_mov.col = n.col;
                 emit(init_mov);
 
                 size_t cond_idx = create_block("BB_for_cond");
@@ -675,6 +696,7 @@ private:
                 br_cond.op = IROp::Br;
                 br_cond.target_block = fn_.blocks[cond_idx].label;
                 br_cond.line = n.line;
+                br_cond.col = n.col;
                 emit(br_cond);
 
                 // 2. Loop Condition
@@ -687,6 +709,7 @@ private:
                 cond_br.then_block = fn_.blocks[body_idx].label;
                 cond_br.else_block = fn_.blocks[exit_idx].label;
                 cond_br.line = n.line;
+                cond_br.col = n.col;
                 emit(cond_br);
 
                 // 3. Loop Body
@@ -699,6 +722,7 @@ private:
                     br_upd.op = IROp::Br;
                     br_upd.target_block = fn_.blocks[upd_idx].label;
                     br_upd.line = n.line;
+                    br_upd.col = n.col;
                     emit(br_upd);
                 }
 
@@ -712,12 +736,14 @@ private:
                 upd_mov.dest = upd_slot;
                 upd_mov.args = {upd_val};
                 upd_mov.line = n.line;
+                upd_mov.col = n.col;
                 emit(upd_mov);
 
                 Instruction br_back;
                 br_back.op = IROp::Br;
                 br_back.target_block = fn_.blocks[cond_idx].label;
                 br_back.line = n.line;
+                br_back.col = n.col;
                 emit(br_back);
 
                 // 5. Exit Block

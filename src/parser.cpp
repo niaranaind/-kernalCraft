@@ -30,6 +30,7 @@ public:
 
     KernelDecl parse_kernel() {
         int ln = cur().line;
+        int col = cur().col;
 
         // A program is exactly one kernel declaration.
         expect(Tok::Kernel);
@@ -37,14 +38,15 @@ public:
         expect(Tok::LParen);
         auto params = parse_params();
         expect(Tok::RParen);
-        auto body = parse_block();
+        int end_ln = cur().line;
+        auto body = parse_block(&end_ln);
 
         // There should be nothing left after the kernel.
         if (cur().kind != Tok::Eof) {
             error("unexpected token after kernel body");
         }
 
-        return {std::move(name), std::move(params), std::move(body), ln};
+        return {std::move(name), std::move(params), std::move(body), ln, col, end_ln};
     }
 
 private:
@@ -126,12 +128,13 @@ private:
     // --- Block ---
 
     // block = "{" { stmt } "}"
-    std::vector<StmtPtr> parse_block() {
+    std::vector<StmtPtr> parse_block(int* out_end_line = nullptr) {
         expect(Tok::LBrace);
         std::vector<StmtPtr> stmts;
         while (cur().kind != Tok::RBrace && cur().kind != Tok::Eof) {
             stmts.push_back(parse_stmt());
         }
+        if (out_end_line) *out_end_line = cur().line;
         expect(Tok::RBrace);
         return stmts;
     }
@@ -159,18 +162,20 @@ private:
     // var_decl = type IDENT "=" expr ";"
     StmtPtr parse_var_decl() {
         int ln = cur().line;
+        int col = cur().col;
         Type t = parse_type();
         std::string name = expect_ident();
         expect(Tok::Assign);
         auto init = parse_expr();
         expect(Tok::Semi);
-        return make_stmt(VarDeclStmt{t, std::move(name), std::move(init), ln});
+        return make_stmt(VarDeclStmt{t, std::move(name), std::move(init), ln, col});
     }
 
     // assign_stmt = lvalue "=" expr ";"
     // lvalue = IDENT | IDENT "[" expr "]"
     StmtPtr parse_assign() {
         int ln = cur().line;
+        int col = cur().col;
         std::string name = expect_ident();
 
         // Check for indexed assignment: name[expr] = expr;
@@ -181,14 +186,14 @@ private:
             auto value = parse_expr();
             expect(Tok::Semi);
             return make_stmt(IndexAssignStmt{
-                std::move(name), std::move(index), std::move(value), ln});
+                std::move(name), std::move(index), std::move(value), ln, col});
         }
 
         // Simple assignment: name = expr;
         expect(Tok::Assign);
         auto value = parse_expr();
         expect(Tok::Semi);
-        return make_stmt(AssignStmt{std::move(name), std::move(value), ln});
+        return make_stmt(AssignStmt{std::move(name), std::move(value), ln, col});
     }
 
     // Parse an assignment without the trailing semicolon (used in for-loop update).
@@ -203,6 +208,7 @@ private:
     // if_stmt = "if" "(" expr ")" block [ "else" block ]
     StmtPtr parse_if() {
         int ln = cur().line;
+        int col = cur().col;
         expect(Tok::If);
         expect(Tok::LParen);
         auto cond = parse_expr();
@@ -215,7 +221,7 @@ private:
         }
 
         return make_stmt(IfStmt{
-            std::move(cond), std::move(then_body), std::move(else_body), ln});
+            std::move(cond), std::move(then_body), std::move(else_body), ln, col});
     }
 
     // for_stmt = "for" "(" var_decl expr ";" assign_no_semi ")" block
@@ -227,6 +233,7 @@ private:
     // Then an assignment without semicolon, followed by ")".
     StmtPtr parse_for() {
         int ln = cur().line;
+        int col = cur().col;
         expect(Tok::For);
         expect(Tok::LParen);
 
@@ -251,7 +258,7 @@ private:
             init_type, std::move(init_name), std::move(init_expr),
             std::move(cond),
             std::move(upd_name), std::move(upd_expr),
-            std::move(body), ln});
+            std::move(body), ln, col});
     }
 
     // --- Expressions (recursive descent with one function per precedence level) ---
@@ -277,6 +284,7 @@ private:
         auto lhs = parse_additive();
         while (true) {
             int ln = cur().line;
+            int col = cur().col;
             BinOp op;
             if      (cur().kind == Tok::Lt) op = BinOp::Lt;
             else if (cur().kind == Tok::Gt) op = BinOp::Gt;
@@ -287,7 +295,7 @@ private:
             else break;
             advance();
             auto rhs = parse_additive();
-            lhs = make_expr(BinaryExpr{op, std::move(lhs), std::move(rhs), ln});
+            lhs = make_expr(BinaryExpr{op, std::move(lhs), std::move(rhs), ln, col});
         }
         return lhs;
     }
@@ -297,13 +305,14 @@ private:
         auto lhs = parse_multiplicative();
         while (true) {
             int ln = cur().line;
+            int col = cur().col;
             BinOp op;
             if      (cur().kind == Tok::Plus)  op = BinOp::Add;
             else if (cur().kind == Tok::Minus) op = BinOp::Sub;
             else break;
             advance();
             auto rhs = parse_multiplicative();
-            lhs = make_expr(BinaryExpr{op, std::move(lhs), std::move(rhs), ln});
+            lhs = make_expr(BinaryExpr{op, std::move(lhs), std::move(rhs), ln, col});
         }
         return lhs;
     }
@@ -313,13 +322,14 @@ private:
         auto lhs = parse_unary();
         while (true) {
             int ln = cur().line;
+            int col = cur().col;
             BinOp op;
             if      (cur().kind == Tok::Star)  op = BinOp::Mul;
             else if (cur().kind == Tok::Slash) op = BinOp::Div;
             else break;
             advance();
             auto rhs = parse_unary();
-            lhs = make_expr(BinaryExpr{op, std::move(lhs), std::move(rhs), ln});
+            lhs = make_expr(BinaryExpr{op, std::move(lhs), std::move(rhs), ln, col});
         }
         return lhs;
     }
@@ -333,9 +343,10 @@ private:
     ExprPtr parse_unary() {
         if (cur().kind == Tok::Minus) {
             int ln = cur().line;
+            int col = cur().col;
             advance();
             auto operand = parse_unary();
-            return make_expr(UnaryMinusExpr{std::move(operand), ln});
+            return make_expr(UnaryMinusExpr{std::move(operand), ln, col});
         }
         return parse_primary();
     }
@@ -344,19 +355,20 @@ private:
     //         | IDENT "." IDENT | IDENT | "(" expr ")"
     ExprPtr parse_primary() {
         int ln = cur().line;
+        int col = cur().col;
 
         // Integer literal
         if (cur().kind == Tok::IntLit) {
             int val = std::stoi(cur().text);
             advance();
-            return make_expr(IntLitExpr{val, ln});
+            return make_expr(IntLitExpr{val, ln, col});
         }
 
         // Float literal
         if (cur().kind == Tok::FloatLit) {
             float val = std::stof(cur().text);
             advance();
-            return make_expr(FloatLitExpr{val, ln});
+            return make_expr(FloatLitExpr{val, ln, col});
         }
 
         // Identifier — could be a variable, array access, or builtin (tid.x etc.)
@@ -369,7 +381,7 @@ private:
                 advance();
                 auto index = parse_expr();
                 expect(Tok::RBracket);
-                return make_expr(IndexExpr{std::move(name), std::move(index), ln});
+                return make_expr(IndexExpr{std::move(name), std::move(index), ln, col});
             }
 
             // Builtin: tid.x, bid.x, bdim.x
@@ -393,11 +405,11 @@ private:
                         "'; only .x is supported");
                 }
                 std::string full = name + "." + field;
-                return make_expr(BuiltinExpr{std::move(full), ln});
+                return make_expr(BuiltinExpr{std::move(full), ln, col});
             }
 
             // Plain variable reference.
-            return make_expr(VarExpr{std::move(name), ln});
+            return make_expr(VarExpr{std::move(name), ln, col});
         }
 
         // Parenthesized expression

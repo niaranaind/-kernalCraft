@@ -42,6 +42,7 @@ struct Token {
     Tok kind;
     std::string text;   // The actual characters from the source
     int line;           // 1-based line number where this token starts
+    int col = 1;        // 1-based column number where this token starts
 };
 
 // Scan the source string into a flat list of tokens.

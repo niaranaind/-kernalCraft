@@ -81,6 +81,7 @@ struct Instruction {
     std::string else_block;          // For CondBr
 
     int line = 0;                    // Source line number for debug info (.loc)
+    int col = 0;                     // Source column number for debug info (.loc)
 };
 
 // ---------------------------------------------------------------------------
@@ -102,6 +103,9 @@ struct IRFunction {
     std::vector<IRParam> params;
     std::vector<BasicBlock> blocks;
     std::vector<Value> var_slots;    // All declared mutable variable slots
+    int entry_line = 1;
+    int entry_col = 1;
+    int end_line = 1;
 };
 
 // ---------------------------------------------------------------------------

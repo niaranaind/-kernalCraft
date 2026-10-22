@@ -49,26 +49,26 @@ enum class BinOp {
 const char* binop_str(BinOp op);
 
 // An integer literal like 42.
-struct IntLitExpr   { int value; int line; };
+struct IntLitExpr   { int value; int line; int col = 1; };
 
 // A float literal like 3.14.
-struct FloatLitExpr { float value; int line; };
+struct FloatLitExpr { float value; int line; int col = 1; };
 
 // A variable reference like "n" or "x".
-struct VarExpr      { std::string name; int line; };
+struct VarExpr      { std::string name; int line; int col = 1; };
 
 // A binary operation like "a + b".
-struct BinaryExpr   { BinOp op; ExprPtr lhs, rhs; int line; };
+struct BinaryExpr   { BinOp op; ExprPtr lhs, rhs; int line; int col = 1; };
 
 // An array index like "x[i]" — dereferences pointer x at offset i.
-struct IndexExpr    { std::string array_name; ExprPtr index; int line; };
+struct IndexExpr    { std::string array_name; ExprPtr index; int line; int col = 1; };
 
 // Unary minus like "-x" or "-3".  Negates a scalar (int or float).
-struct UnaryMinusExpr { ExprPtr operand; int line; };
+struct UnaryMinusExpr { ExprPtr operand; int line; int col = 1; };
 
 // A GPU built-in like tid.x, bid.x, bdim.x.
 // We store the full name (e.g. "tid.x") rather than parsing it further.
-struct BuiltinExpr  { std::string name; int line; };
+struct BuiltinExpr  { std::string name; int line; int col = 1; };
 
 // An expression is one of the above alternatives.
 // We use a variant so each node is a plain struct — no virtual functions.
@@ -79,6 +79,7 @@ struct Expr {
     // Convenience: line number of this expression (delegates to whichever
     // variant is active).
     int line() const;
+    int col() const;
 };
 
 // Helper to create an ExprPtr wrapping a node.
@@ -102,6 +103,7 @@ struct VarDeclStmt {
     std::string name;
     ExprPtr init;
     int line;
+    int col = 1;
 };
 
 // Assignment to a variable: "x = expr;"
@@ -109,6 +111,7 @@ struct AssignStmt {
     std::string name;
     ExprPtr value;
     int line;
+    int col = 1;
 };
 
 // Indexed assignment: "y[i] = expr;"  (store through a pointer)
@@ -117,6 +120,7 @@ struct IndexAssignStmt {
     ExprPtr index;
     ExprPtr value;
     int line;
+    int col = 1;
 };
 
 // If statement: "if (cond) { ... }" with optional else block.
@@ -125,6 +129,7 @@ struct IfStmt {
     std::vector<StmtPtr> then_body;
     std::vector<StmtPtr> else_body;   // empty if no else clause
     int line;
+    int col = 1;
 };
 
 // For loop: "for (int i = 0; i < n; i = i + 1) { ... }"
@@ -141,6 +146,7 @@ struct ForStmt {
     // The loop body.
     std::vector<StmtPtr> body;
     int line;
+    int col = 1;
 };
 
 struct Stmt {
@@ -169,7 +175,9 @@ struct KernelDecl {
     std::string name;
     std::vector<Param> params;
     std::vector<StmtPtr> body;
-    int line;   // line of the "kernel" keyword
+    int line;       // line of the "kernel" keyword
+    int col = 1;    // column of the "kernel" keyword
+    int end_line = 1; // line of the closing "}"
 };
 
 // ============================================================================

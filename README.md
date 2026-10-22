@@ -155,6 +155,81 @@ To build the compiler, assemble with `ptxas`, and execute all 5 kernels on the T
 bash scripts/run_dgx.sh
 ```
 
+## Source-Line Debug Info & Source Mapping (Phase 4a)
+
+MiniPTX emits standard DWARF-compatible line information using PTX directives:
+- **`.file 1 "<filename>"`**: Declares the source file at module scope.
+- **`.loc 1 <line> <col>`**: Precedes emitted instructions, mapping each PTX instruction to its exact 1-based source line and column.
+- Column numbers are tracked throughout the compilation pipeline (lexer $\to$ AST $\to$ IR $\to$ PTX emitter).
+
+### Interleaved Source-to-PTX Listing (`--map`)
+Invoking `miniptxc --map <kernel.mk>` prints an interleaved listing pairing each source line with its generated PTX instructions.
+
+**Real emitter output for `examples/saxpy.mk`**:
+```text
+$ ./build/miniptxc --map examples/saxpy.mk
+; [Line 1] kernel saxpy(float a, float* x, float* y, int n) {
+    ld.param.f32    %f0, [param_a];
+    ld.param.u64    %rd1, [param_x];
+    cvta.to.global.u64 %rd2, %rd1;
+    ld.param.u64    %rd3, [param_y];
+    cvta.to.global.u64 %rd4, %rd3;
+    ld.param.s32    %r0, [param_n];
+BB0:
+    mov.f32         %f1, %f0;
+    mov.b64         %rd5, %rd2;
+    mov.b64         %rd6, %rd4;
+    mov.b32         %r1, %r0;
+
+; [Line 2]     int i = tid.x + bid.x * bdim.x;
+    mov.u32         %r3, %tid.x;
+    mov.u32         %r4, %ctaid.x;
+    mov.u32         %r5, %ntid.x;
+    mul.lo.s32      %r6, %r4, %r5;
+    add.s32         %r7, %r3, %r6;
+    mov.b32         %r2, %r7;
+
+; [Line 3]     if (i < n) { y[i] = a * x[i] + y[i]; }
+    mov.b32         %r8, %r2;
+    mov.b32         %r9, %r1;
+    setp.lt.s32    %p0, %r8, %r9;
+    @!%p0 bra       BB_merge_1;
+BB_then_0:
+    mov.b64         %rd7, %rd6;
+    mov.b32         %r10, %r2;
+    mov.f32         %f2, %f1;
+    mov.b64         %rd8, %rd5;
+    mul.wide.s32    %rd0, %r10, 4;
+    add.s64         %rd0, %rd8, %rd0;
+    ld.global.f32   %f3, [%rd0];
+    mul.rn.f32      %f4, %f2, %f3;
+    mul.wide.s32    %rd0, %r10, 4;
+    add.s64         %rd0, %rd7, %rd0;
+    ld.global.f32   %f5, [%rd0];
+    add.rn.f32      %f6, %f4, %f5;
+    mul.wide.s32    %rd0, %r10, 4;
+    add.s64         %rd0, %rd7, %rd0;
+    st.global.f32   [%rd0], %f6;
+
+; [Line 4] }
+BB_merge_1:
+    ret;
+```
+
+### Inspecting Debug Line Info on the DGX
+To verify that `ptxas` translates `.loc` directives into DWARF line information in the compiled ELF (`.cubin`):
+```bash
+# 1. Compile PTX to cubin with line info
+ptxas -lineinfo -m64 -arch=sm_70 build_dgx/saxpy.ptx -o build_dgx/saxpy.cubin
+
+# 2. Inspect debug sections in the ELF binary
+cuobjdump -elf build_dgx/saxpy.cubin | grep -i debug
+
+# 3. Disassemble SASS instructions with interleaved source lines
+nvdisasm -g build_dgx/saxpy.cubin
+```
+*(Note: Inspecting the cubin sections and SASS disassembly via `cuobjdump` and `nvdisasm` is **unverified until run on the DGX**).*
+
 ## Build & Test Locally (macOS)
 ```bash
 cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure
@@ -162,9 +237,11 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on
 
 ## Usage
 ```bash
-./build/miniptxc examples/saxpy.mk           # compile to PTX (stdout)
-./build/miniptxc --dump-ast examples/saxpy.mk # print the AST
-./build/miniptxc --dump-ir examples/saxpy.mk  # print the optimized IR
+./build/miniptxc examples/saxpy.mk              # compile to PTX (with .loc line info)
+./build/miniptxc --no-lineinfo examples/saxpy.mk # compile to PTX without debug directives
+./build/miniptxc --map examples/saxpy.mk        # print interleaved source-to-PTX map
+./build/miniptxc --dump-ast examples/saxpy.mk    # print the AST
+./build/miniptxc --dump-ir examples/saxpy.mk     # print the optimized IR
 ```
 
 ## Roadmap
@@ -172,9 +249,13 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on
 - [x] Week 2: IR lowering, basic blocks, IR printer & verifier, constant folding / DCE / CSE
 - [x] Week 3: PTX emitter, CUDA Driver API runtime, structural golden-file tests, DGX validation script
 - [ ] Week 4: module linker, .loc debug info, benchmark vs hand-written CUDA
+  - [x] Phase 4a: .loc & .file debug info, column tracking, --map source-to-PTX listing
+  - [ ] Phase 4c: SAXPY micro-benchmark vs hand-written CUDA (Driver API, CUDA events)
+  - [ ] Phase 4b: Helper functions (`func`), call-graph cycle check, module linker
 
 ## Verification Results
 - **Phase 1 tests (CPU)**: 43/43 passed (lexer, parser, AST shape, precedence, scopes, type checking).
 - **Phase 2 tests (CPU)**: 25/25 passed (IR verifier, before/after pass tests, safety invariant tests, full pipeline).
 - **Phase 3 tests (CPU)**: 10/10 passed (structural checks, register coverage, branch target checks, instruction format checks, float hex formatting, comparison fusion).
+- **Phase 4a tests (CPU)**: 6/6 passed (lexer column tracking, AST column propagation, PTX `.file`/`.loc` emission, `--map` interleaved mapping, for-loop mapping).
 - **GPU Execution & ptxas**: **Unverified on macOS** (no NVIDIA GPU or ptxas installed locally). Complete code and automated test script `scripts/run_dgx.sh` provided for execution on your DGX Tesla V100.

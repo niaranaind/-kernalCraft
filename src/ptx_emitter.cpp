@@ -52,18 +52,79 @@ const char* ptx_cmp_op(IROp op, bool is_float) {
 
 class PTXEmitter {
 public:
+    struct MappedItem {
+        int line = 0;
+        int col = 0;
+        std::string text;
+        bool is_label = false;
+    };
+
     PTXEmitter(const IRFunction& fn, const EmitterOptions& options)
         : fn_(fn), options_(options) {}
 
-    std::string emit() {
+    std::vector<MappedItem> collect_items() {
         analyze_uses();
         allocate_registers();
+
+        std::vector<MappedItem> items;
+
+        // Load parameters from .param space
+        for (const auto& p : fn_.params) {
+            std::string param_temp = "%param_" + p.name;
+            std::string reg = reg_map_[param_temp];
+
+            if (p.type.is_ptr) {
+                std::string raw_reg = param_raw_regs_[p.name];
+                items.push_back({fn_.entry_line, fn_.entry_col, "ld.param.u64    " + raw_reg + ", [param_" + p.name + "];", false});
+                items.push_back({fn_.entry_line, fn_.entry_col, "cvta.to.global.u64 " + reg + ", " + raw_reg + ";", false});
+            } else if (p.type.base == BaseType::Int) {
+                items.push_back({fn_.entry_line, fn_.entry_col, "ld.param.s32    " + reg + ", [param_" + p.name + "];", false});
+            } else {
+                items.push_back({fn_.entry_line, fn_.entry_col, "ld.param.f32    " + reg + ", [param_" + p.name + "];", false});
+            }
+        }
+
+        // Emit Basic Blocks
+        for (size_t bi = 0; bi < fn_.blocks.size(); ++bi) {
+            const auto& bb = fn_.blocks[bi];
+            std::string next_label = (bi + 1 < fn_.blocks.size()) ? fn_.blocks[bi + 1].label : "";
+
+            int block_line = bb.instrs.empty() ? fn_.end_line : bb.instrs[0].line;
+            int block_col = bb.instrs.empty() ? 1 : bb.instrs[0].col;
+            items.push_back({block_line, block_col, bb.label + ":", true});
+
+            for (const auto& inst : bb.instrs) {
+                std::ostringstream ss;
+                emit_instruction(ss, inst, next_label);
+
+                std::stringstream iss(ss.str());
+                std::string iline;
+                while (std::getline(iss, iline)) {
+                    size_t first = iline.find_first_not_of(" \t");
+                    if (first != std::string::npos) {
+                        std::string trimmed = iline.substr(first);
+                        items.push_back({inst.line, inst.col, trimmed, false});
+                    }
+                }
+            }
+        }
+
+        return items;
+    }
+
+    std::string emit() {
+        auto items = collect_items();
 
         std::ostringstream ss;
         // Directives
         ss << ".version " << options_.ptx_version << "\n";
         ss << ".target " << options_.target << "\n";
         ss << ".address_size 64\n\n";
+
+        if (options_.emit_line_info) {
+            std::string src_name = options_.source_filename.empty() ? "kernel.mk" : options_.source_filename;
+            ss << ".file 1 \"" << src_name << "\"\n\n";
+        }
 
         // Kernel Entry Declaration
         ss << ".visible .entry " << fn_.name << "(\n";
@@ -90,31 +151,22 @@ public:
         if (num_rd_ > 0)   ss << "    .reg .b64    %rd<" << num_rd_ << ">;\n";
         ss << "\n";
 
-        // Load parameters from .param space
-        for (const auto& p : fn_.params) {
-            std::string param_temp = "%param_" + p.name;
-            std::string reg = reg_map_[param_temp];
+        int last_loc_line = -1;
+        int last_loc_col = -1;
 
-            if (p.type.is_ptr) {
-                std::string raw_reg = param_raw_regs_[p.name];
-                ss << "    ld.param.u64    " << raw_reg << ", [param_" << p.name << "];\n";
-                ss << "    cvta.to.global.u64 " << reg << ", " << raw_reg << ";\n";
-            } else if (p.type.base == BaseType::Int) {
-                ss << "    ld.param.s32    " << reg << ", [param_" << p.name << "];\n";
+        for (const auto& item : items) {
+            if (item.is_label) {
+                ss << item.text << "\n";
             } else {
-                ss << "    ld.param.f32    " << reg << ", [param_" << p.name << "];\n";
-            }
-        }
-        ss << "\n";
-
-        // Emit Basic Blocks
-        for (size_t bi = 0; bi < fn_.blocks.size(); ++bi) {
-            const auto& bb = fn_.blocks[bi];
-            std::string next_label = (bi + 1 < fn_.blocks.size()) ? fn_.blocks[bi + 1].label : "";
-
-            ss << bb.label << ":\n";
-            for (const auto& inst : bb.instrs) {
-                emit_instruction(ss, inst, next_label);
+                if (options_.emit_line_info && item.line > 0) {
+                    int c = item.col > 0 ? item.col : 1;
+                    if (item.line != last_loc_line || c != last_loc_col) {
+                        ss << "    .loc 1 " << item.line << " " << c << "\n";
+                        last_loc_line = item.line;
+                        last_loc_col = c;
+                    }
+                }
+                ss << "    " << item.text << "\n";
             }
         }
 
@@ -464,6 +516,59 @@ private:
 std::string emit_ptx(const IRFunction& fn, const EmitterOptions& options) {
     PTXEmitter emitter(fn, options);
     return emitter.emit();
+}
+
+std::string emit_ptx_map(const IRFunction& fn, const std::string& source, const EmitterOptions& options) {
+    PTXEmitter emitter(fn, options);
+    auto items = emitter.collect_items();
+
+    // Split source code into lines
+    std::vector<std::string> src_lines;
+    std::stringstream sss(source);
+    std::string sline;
+    while (std::getline(sss, sline)) {
+        src_lines.push_back(sline);
+    }
+
+    // Group items by line
+    std::unordered_map<int, std::vector<PTXEmitter::MappedItem>> line_map;
+    for (const auto& item : items) {
+        int l = item.line > 0 ? item.line : 1;
+        line_map[l].push_back(item);
+    }
+
+    std::ostringstream out;
+    const int num_lines = static_cast<int>(src_lines.size());
+    for (int l = 1; l <= num_lines; ++l) {
+        auto it = line_map.find(l);
+        if (it != line_map.end() && !it->second.empty()) {
+            out << "; [Line " << l << "] " << src_lines[l - 1] << "\n";
+            for (const auto& item : it->second) {
+                if (item.is_label) {
+                    out << item.text << "\n";
+                } else {
+                    out << "    " << item.text << "\n";
+                }
+            }
+            out << "\n";
+        }
+    }
+
+    for (const auto& [l, list] : line_map) {
+        if (l > num_lines) {
+            out << "; [Line " << l << "]\n";
+            for (const auto& item : list) {
+                if (item.is_label) {
+                    out << item.text << "\n";
+                } else {
+                    out << "    " << item.text << "\n";
+                }
+            }
+            out << "\n";
+        }
+    }
+
+    return out.str();
 }
 
 std::string emit_ptx() {

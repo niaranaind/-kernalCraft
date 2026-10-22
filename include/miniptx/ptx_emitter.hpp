@@ -14,10 +14,15 @@ inline constexpr const char* DEFAULT_PTX_TARGET = "sm_70";
 struct EmitterOptions {
     std::string ptx_version = DEFAULT_PTX_VERSION;
     std::string target = DEFAULT_PTX_TARGET;
+    bool emit_line_info = false;
+    std::string source_filename = "";
 };
 
 // Emit valid NVIDIA PTX string from an IRFunction.
 std::string emit_ptx(const IRFunction& fn, const EmitterOptions& options = {});
+
+// Generate human-readable source-to-PTX mapping
+std::string emit_ptx_map(const IRFunction& fn, const std::string& source, const EmitterOptions& options = {});
 
 // Legacy compatibility overload
 std::string emit_ptx();
