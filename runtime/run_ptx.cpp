@@ -105,6 +105,7 @@ static std::string read_file(const std::string& path) {
 // ---------------------------------------------------------------------------
 
 bool test_kernel_vecadd(CUcontext ctx, const std::string& ptx_path) {
+    (void)ctx;
     std::string ptx = read_file(ptx_path);
     if (ptx.empty()) return false;
 
@@ -160,6 +161,7 @@ bool test_kernel_vecadd(CUcontext ctx, const std::string& ptx_path) {
 // ---------------------------------------------------------------------------
 
 bool test_kernel_saxpy(CUcontext ctx, const std::string& ptx_path) {
+    (void)ctx;
     std::string ptx = read_file(ptx_path);
     if (ptx.empty()) return false;
 
@@ -213,6 +215,7 @@ bool test_kernel_saxpy(CUcontext ctx, const std::string& ptx_path) {
 // ---------------------------------------------------------------------------
 
 bool test_kernel_scale(CUcontext ctx, const std::string& ptx_path) {
+    (void)ctx;
     std::string ptx = read_file(ptx_path);
     if (ptx.empty()) return false;
 
@@ -261,6 +264,7 @@ bool test_kernel_scale(CUcontext ctx, const std::string& ptx_path) {
 // ---------------------------------------------------------------------------
 
 bool test_kernel_ewmax(CUcontext ctx, const std::string& ptx_path) {
+    (void)ctx;
     std::string ptx = read_file(ptx_path);
     if (ptx.empty()) return false;
 
@@ -315,6 +319,7 @@ bool test_kernel_ewmax(CUcontext ctx, const std::string& ptx_path) {
 // ---------------------------------------------------------------------------
 
 bool test_kernel_fill(CUcontext ctx, const std::string& ptx_path) {
+    (void)ctx;
     std::string ptx = read_file(ptx_path);
     if (ptx.empty()) return false;
 

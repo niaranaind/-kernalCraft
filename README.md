@@ -155,6 +155,15 @@ To build the compiler, assemble with `ptxas`, and execute all 5 kernels on the T
 bash scripts/run_dgx.sh
 ```
 
+### Troubleshooting on Shared Linux Clusters (e.g. DGX)
+
+#### `GLIBCXX_3.4.XX not found`
+- **Cause**: On shared systems such as NVIDIA DGX servers, a newer `g++` toolchain in `$PATH` may produce binaries referencing newer C++ runtime symbols than the host's default dynamic `/usr/lib/x86_64-linux-gnu/libstdc++.so.6`. When launching the compiled binary (`miniptxc` or `run_ptx`), the dynamic linker throws:
+  ```text
+  /usr/lib/x86_64-linux-gnu/libstdc++.so.6: version `GLIBCXX_3.4.29' not found
+  ```
+- **Solution**: Link both binaries with `-static-libstdc++ -static-libgcc`. This statically embeds the required standard library routines into the executable, making it completely independent of the system's dynamic `libstdc++` version. `scripts/run_dgx.sh` automatically links with these flags.
+
 ## Source-Line Debug Info & Source Mapping (Phase 4a)
 
 MiniPTX emits standard DWARF-compatible line information using PTX directives:

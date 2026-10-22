@@ -482,7 +482,7 @@ private:
                 Value lhs = lower_expr(*n.lhs);
                 Value rhs = lower_expr(*n.rhs);
 
-                IROp op;
+                IROp op = IROp::Add;
                 Type res_type = lhs.type;
                 switch (n.op) {
                     case BinOp::Add: op = IROp::Add; break;
@@ -495,6 +495,7 @@ private:
                     case BinOp::Ge:  op = IROp::Ge; res_type = Type{BaseType::Int, false}; break;
                     case BinOp::Eq:  op = IROp::Eq; res_type = Type{BaseType::Int, false}; break;
                     case BinOp::Ne:  op = IROp::Ne; res_type = Type{BaseType::Int, false}; break;
+                    default:         op = IROp::Add; break;
                 }
 
                 Value dest = new_temp(res_type);
