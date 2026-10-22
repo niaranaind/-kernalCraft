@@ -267,11 +267,11 @@ To evaluate code generation quality, we benchmark MiniPTX against idiomatic hand
 
 | Implementation | PTX Instructions | SASS Instructions | Median Time (ms) | Effective BW (GB/s) | Relative Ratio |
 |---|---|---|---|---|---|
-| **MiniPTX** (emitted PTX) | 36 | 24 | 0.2570 ms | 783.3 GB/s | 1.000x |
-| **CUDA** (`nvcc -O3` PTX) | 20 | 16 | 0.2570 ms | 783.3 GB/s | 1.000x |
+| **MiniPTX** (emitted PTX) | 36 | 24 | 0.2570 ms | 783.2988 GB/s | 1.000x |
+| **CUDA** (`nvcc -O3` PTX) | 20 | 16 | 0.2570 ms | 783.2988 GB/s | 1.000x |
 
 > [!NOTE]
-> **Observation**: Both MiniPTX and `nvcc -O3` achieve an identical median runtime of `0.2570 ms` (`783.3 GB/s`). SAXPY has an arithmetic intensity of $0.167\text{ FLOP/byte}$, which completely saturates the Volta HBM2 memory subsystem. Because memory bandwidth is the bottleneck, the difference in instruction counts (36 vs 20 PTX, 24 vs 16 SASS) does not impact execution time.
+> **Observation**: Both MiniPTX and `nvcc -O3` achieve an identical median runtime of `0.2570 ms` (`783.2988 GB/s`). SAXPY has an arithmetic intensity of $0.167\text{ FLOP/byte}$, which completely saturates the Volta HBM2 memory subsystem. Because memory bandwidth is the bottleneck, the difference in instruction counts (36 vs 20 PTX, 24 vs 16 SASS) does not impact execution time.
 
 ### Benchmark 2: Compute-Heavy (N = 2^24 elements, 64-iter inner loop)
 
@@ -283,22 +283,21 @@ To evaluate code generation quality, we benchmark MiniPTX against idiomatic hand
 
 | Implementation | PTX Instructions | SASS Instructions | Median Time (ms) | Throughput (GFLOPS) | Relative Ratio |
 |---|---|---|---|---|---|
-| **MiniPTX** (emitted PTX) | 54 | 24 | 0.4721 ms | 4549 GFLOPS | 1.122x (12.17% slower) |
-| **CUDA** (`nvcc -O3` PTX) | 28 | 32 | 0.4209 ms | 5103 GFLOPS | 1.000x (baseline) |
+| **MiniPTX** (emitted PTX) | 54 | *Pending rerun* | 0.4424 ms | 4854.5 GFLOPS | 1.121x (12.06% slower) |
+| **CUDA** (`nvcc -O3` PTX) | 28 | *Pending rerun* | 0.3948 ms | 5440.1 GFLOPS | 1.000x (baseline) |
+| **CUDA no-FMA** (`nvcc -O3 --fmad=false`) | 29 | *Pending rerun* | 0.4424 ms | 4854.5 GFLOPS | 1.000x (matches MiniPTX) |
 
 > [!NOTE]
-> **Observation on SASS vs Execution Time**:
-> - MiniPTX produces fewer static SASS instructions (24 vs 32), yet runs 12.17% slower (0.4721 ms vs 0.4209 ms).
-> - **Static SASS counts do not equal executed instructions**: when loops are involved, dynamic instruction issue, loop unrolling, and single-instruction FMA fusion dictate executed cycles rather than static binary length.
+> **Measured Finding: Hardware FMA Fusion Accounts for the Gap**:
+> - **Empirically Confirmed**: MiniPTX runtime (`0.4424 ms`) matches the `--fmad=false` CUDA control (`0.4424 ms`) exactly (`1.000x`, `4854.5 GFLOPS`).
+> - Default hardware FMA contraction in `nvcc -O3` yields a `10.76%` speedup (`0.3948 ms`, `0.892x`), accounting for the entire `12.06%` difference observed between MiniPTX and default `nvcc -O3`.
+> - Because MiniPTX emits explicit separate `mul.rn.f32` and `add.rn.f32` operations, `ptxas` does not fuse them into `FFMA`, whereas `nvcc` contracts them by default.
 >
-> **Hypotheses for the 12.17% Gap (Pending Empirical Measurement)**:
-> 1. *Hypothesis 1 (FMA Fusion)*: MiniPTX emits separate `mul.rn.f32` and `add.rn.f32`. If `ptxas` did not fuse them into `FFMA`, while `nvcc` utilized `FFMA`, CUDA executes 1 arithmetic instruction per loop iteration instead of 2.
-> 2. *Hypothesis 2 (Loop Scheduling & Unrolling)*: `nvcc` may have unrolled iterations or scheduled instructions across dual-issue datapaths to better hide instruction latencies.
-> 3. *Hypothesis 3 (IR Copy Elimination)*: Redundant temporary `mov` operations in the unoptimized IR loop header/latch may leave residual register moves or pipeline stalls.
+> **Measurement Stability on Shared DGX**:
+> Absolute execution times vary slightly across runs on the shared DGX cluster (e.g. `0.4424 ms` vs `0.4721 ms` in an earlier run) due to concurrent GPU activity and background thermal/power states. However, the comparative ratios measured via alternating execution remain remarkably stable (`1.121x` vs `1.122x`).
 >
-> To empirically isolate the cause rather than guessing, two diagnostics have been integrated into `scripts/benchmark_dgx.sh`:
-> - **Diagnostic (a)**: Benchmark CUDA built with `nvcc -O3 --fmad=false` as a third row to directly quantify the contribution of hardware FMA fusion.
-> - **Diagnostic (b)**: Inspect the compiled cubin via `cuobjdump -sass` to report exact counts of `FFMA`, `FMUL`, and `FADD` instructions and detect whether the loop body is rolled or unrolled.
+> **SASS Opcode Confirmation**:
+> Direct confirmation of the underlying machine opcodes (`FFMA` vs `FMUL`/`FADD` counts) and loop unrolling status from the cubin disassembly remains unverified pending execution of the fixed SASS diagnostic script on the DGX.
 
 ### Running Benchmarks on the DGX
 ```bash
@@ -335,4 +334,4 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on
 - **Phase 2 tests (CPU)**: 25/25 passed (IR verifier, before/after pass tests, safety invariant tests, full pipeline).
 - **Phase 3 tests (CPU)**: 10/10 passed (structural checks, register coverage, branch target checks, instruction format checks, float hex formatting, comparison fusion).
 - **Phase 4a tests (CPU)**: 6/6 passed (lexer column tracking, AST column propagation, PTX `.file`/`.loc` emission, `--map` interleaved mapping, for-loop mapping).
-- **GPU Execution & ptxas (DGX Tesla V100)**: **5/5 tests passed** (Phase 3 & 4a verified, DWARF `.debug_line` and `.nv_debug_line_sass` verified, SAXPY verified at 0.2570 ms / 783.3 GB/s, compute-heavy verified at 0.4721 ms / 4549 GFLOPS; sanitized log in `docs/dgx_benchmark.log`).
+- **GPU Execution & ptxas (DGX Tesla V100)**: **5/5 tests passed** (Phase 3 & 4a verified, DWARF `.debug_line` and `.nv_debug_line_sass` verified, SAXPY verified at 0.2570 ms / 783.2988 GB/s, compute-heavy verified at 0.4424 ms / 4854.5 GFLOPS matching CUDA --fmad=false control at 1.000x; sanitized log in `docs/dgx_benchmark.log`).
