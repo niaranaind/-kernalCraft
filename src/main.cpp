@@ -62,8 +62,8 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        // Phase 3+: PTX emission (stub for now)
-        std::cout << miniptx::emit_ptx();
+        // Phase 3: Emit PTX assembly
+        std::cout << miniptx::emit_ptx(ir_fn);
 
     } catch (const std::runtime_error& e) {
         std::cerr << "error: " << e.what() << "\n";
