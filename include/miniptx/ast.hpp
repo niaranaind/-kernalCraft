@@ -63,6 +63,9 @@ struct BinaryExpr   { BinOp op; ExprPtr lhs, rhs; int line; };
 // An array index like "x[i]" — dereferences pointer x at offset i.
 struct IndexExpr    { std::string array_name; ExprPtr index; int line; };
 
+// Unary minus like "-x" or "-3".  Negates a scalar (int or float).
+struct UnaryMinusExpr { ExprPtr operand; int line; };
+
 // A GPU built-in like tid.x, bid.x, bdim.x.
 // We store the full name (e.g. "tid.x") rather than parsing it further.
 struct BuiltinExpr  { std::string name; int line; };
@@ -71,7 +74,7 @@ struct BuiltinExpr  { std::string name; int line; };
 // We use a variant so each node is a plain struct — no virtual functions.
 struct Expr {
     std::variant<IntLitExpr, FloatLitExpr, VarExpr, BinaryExpr,
-                 IndexExpr, BuiltinExpr> node;
+                 IndexExpr, UnaryMinusExpr, BuiltinExpr> node;
 
     // Convenience: line number of this expression (delegates to whichever
     // variant is active).

@@ -15,18 +15,30 @@ source -> lexer -> parser/AST -> type check -> SSA IR -> optimization passes -> 
 - `int*`    — pointer to int  (global memory)
 - `float*`  — pointer to float (global memory)
 
+**No implicit conversions.** You cannot mix `int` and `float` in the same
+expression — for example, `n + 1.0` is a type error if `n` is `int`.
+Write `n + 1` instead.  There is no cast syntax.
+
+**Pointer comparison is not allowed.**  Pointers may only be used with
+the indexing operator `p[i]`; they cannot appear in arithmetic or comparison
+expressions.
+
 ### Built-in read-only values
 - `tid.x`  — thread index within the block (like `threadIdx.x` in CUDA)
 - `bid.x`  — block index within the grid   (like `blockIdx.x`  in CUDA)
 - `bdim.x` — number of threads per block   (like `blockDim.x`  in CUDA)
 
-### Operators (in order of precedence, tightest first)
-1. `*` `/`         — multiplication, division
-2. `+` `-`         — addition, subtraction
-3. `<` `>` `<=` `>=` `==` `!=` — comparison (produce int 0 or 1)
+Only the `.x` component is supported.  Only `tid`, `bid`, and `bdim` are
+valid builtin bases.
 
-All operators are left-associative and binary.
-Unary minus is not supported (use `0 - x`).
+### Operators (in order of precedence, tightest first)
+1. `-` (prefix) — unary minus (int and float only, not pointers)
+2. `*` `/`      — multiplication, division
+3. `+` `-`      — addition, subtraction
+4. `<` `>` `<=` `>=` `==` `!=` — comparison (produce int 0 or 1)
+
+Binary operators are left-associative.  Unary minus binds tighter than
+any binary operator, so `-a * b` is `(-a) * b`.
 
 ### Grammar (EBNF)
 
@@ -50,9 +62,9 @@ lvalue      = IDENT | IDENT "[" expr "]" ;
 expr        = cmp_expr ;
 cmp_expr    = add_expr { ( "<" | ">" | "<=" | ">=" | "==" | "!=" ) add_expr } ;
 add_expr    = mul_expr { ( "+" | "-" ) mul_expr } ;
-mul_expr    = unary     { ( "*" | "/" ) unary } ;
-unary       = primary ;
-primary     = INT_LIT | FLOAT_LIT | IDENT "(" args ")" | IDENT "[" expr "]"
+mul_expr    = unary    { ( "*" | "/" ) unary } ;
+unary       = "-" unary | primary ;
+primary     = INT_LIT | FLOAT_LIT | IDENT "[" expr "]"
             | IDENT "." IDENT | IDENT | "(" expr ")" ;
 
 INT_LIT     = digit { digit } ;
@@ -68,6 +80,8 @@ IDENT       = letter { letter | digit | "_" } ;
 - Integer division truncates toward zero.
 - Comparisons return `int` 0 or 1.
 - The condition in `if` and `for` is true when non-zero.
+- Both operands of a binary operator must have the same scalar type (no implicit int↔float).
+- Pointers cannot appear in arithmetic or comparison expressions.
 
 ## Build
     cmake -S . -B build && cmake --build build && ctest --test-dir build
@@ -78,7 +92,7 @@ IDENT       = letter { letter | digit | "_" } ;
     ./build/miniptxc --dump-ir examples/saxpy.mk  # print the IR (Phase 2)
 
 ## Roadmap
-- [ ] Week 1: lexer, parser, AST, type checker, error messages
+- [x] Week 1: lexer, parser, AST, type checker, error messages
 - [ ] Week 2: SSA IR, IR printer, constant folding / DCE / CSE
 - [ ] Week 3: PTX emitter, run on GPU, CPU-reference tests
 - [ ] Week 4: module linker, .loc debug info, benchmark vs hand-written CUDA

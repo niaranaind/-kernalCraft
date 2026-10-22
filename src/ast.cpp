@@ -61,6 +61,9 @@ static void dump_expr(const Expr& e, int depth) {
         } else if constexpr (std::is_same_v<T, IndexExpr>) {
             std::cout << "Index(" << n.array_name << ")\n";
             dump_expr(*n.index, depth + 1);
+        } else if constexpr (std::is_same_v<T, UnaryMinusExpr>) {
+            std::cout << "UnaryMinus\n";
+            dump_expr(*n.operand, depth + 1);
         } else if constexpr (std::is_same_v<T, BuiltinExpr>) {
             std::cout << "Builtin(" << n.name << ")\n";
         }
@@ -243,6 +246,15 @@ private:
                 }
                 // Dereferencing a pointer gives the base scalar type.
                 return {arr_type.base, false};
+            } else if constexpr (std::is_same_v<T, UnaryMinusExpr>) {
+                // Unary minus: operand must be a scalar (int or float), not a pointer.
+                Type t = check_expr(*n.operand);
+                if (t.is_ptr) {
+                    throw std::runtime_error(
+                        "line " + std::to_string(n.line) +
+                        ": cannot negate pointer type");
+                }
+                return t;  // result has the same type as the operand
             } else if constexpr (std::is_same_v<T, BuiltinExpr>) {
                 // tid.x, bid.x, bdim.x are all int.
                 return {BaseType::Int, false};

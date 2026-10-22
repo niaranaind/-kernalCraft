@@ -6,17 +6,18 @@ namespace miniptx {
 // ============================================================================
 // Parser internals
 //
-// This is a recursive-descent parser.  For expressions, it uses "precedence
-// climbing" (sometimes called Pratt parsing).  The idea:
+// This is a recursive-descent parser with one function per precedence level.
+// The idea:
 //   - Each precedence level has its own parsing function.
 //   - A higher-precedence function is called from within a lower-precedence one.
 //   - This naturally handles associativity and precedence without tables.
 //
 // Our precedence levels (lowest to highest):
-//   1. Comparison:  <  >  <=  >=  ==  !=
-//   2. Additive:    +  -
-//   3. Multiplicative:  *  /
-//   4. Primary:     literals, variables, parenthesized expressions
+//   1. Comparison:       <  >  <=  >=  ==  !=
+//   2. Additive:         +  -
+//   3. Multiplicative:   *  /
+//   4. Unary:            - (prefix)
+//   5. Primary:          literals, variables, parenthesized expressions
 //
 // Error reporting: every error message includes "line N:" so the user can
 // find the problem in their source file.
@@ -230,13 +231,11 @@ private:
         expect(Tok::LParen);
 
         // Init: a variable declaration (eats its own ";")
-        int init_ln = cur().line;
         Type init_type = parse_type();
         std::string init_name = expect_ident();
         expect(Tok::Assign);
         auto init_expr = parse_expr();
         expect(Tok::Semi);
-        (void)init_ln;
 
         // Condition
         auto cond = parse_expr();
@@ -255,16 +254,19 @@ private:
             std::move(body), ln});
     }
 
-    // --- Expressions (precedence climbing) ---
+    // --- Expressions (recursive descent with one function per precedence level) ---
     //
     // Precedence levels:
-    //   Level 1 (lowest):  comparisons   <  >  <=  >=  ==  !=
+    //   Level 1 (lowest):  comparisons    <  >  <=  >=  ==  !=
     //   Level 2:           additive       +  -
-    //   Level 3 (highest): multiplicative *  /
+    //   Level 3:           multiplicative *  /
+    //   Level 4 (highest): unary          - (prefix)
+    //   Level 5:           primary        literals, vars, parens
     //
     // Each level parses the next-higher level for its operands, then loops
     // as long as it sees operators at its own level.  This ensures that
-    // "a + b * c" parses as "a + (b * c)" because * is parsed first.
+    // "a + b * c" parses as "a + (b * c)" because * is parsed at a higher
+    // level than +.
 
     ExprPtr parse_expr() {
         return parse_comparison();
@@ -306,9 +308,9 @@ private:
         return lhs;
     }
 
-    // mul_expr = primary { ( "*" | "/" ) primary }
+    // mul_expr = unary { ( "*" | "/" ) unary }
     ExprPtr parse_multiplicative() {
-        auto lhs = parse_primary();
+        auto lhs = parse_unary();
         while (true) {
             int ln = cur().line;
             BinOp op;
@@ -316,14 +318,30 @@ private:
             else if (cur().kind == Tok::Slash) op = BinOp::Div;
             else break;
             advance();
-            auto rhs = parse_primary();
+            auto rhs = parse_unary();
             lhs = make_expr(BinaryExpr{op, std::move(lhs), std::move(rhs), ln});
         }
         return lhs;
     }
 
-    // primary = INT_LIT | FLOAT_LIT | IDENT "[" expr "]" | IDENT "." IDENT
-    //         | IDENT | "(" expr ")"
+    // unary = "-" unary | primary
+    //
+    // Unary minus binds tighter than binary *, so "-a * b" parses as
+    // "(-a) * b", not "-(a * b)".  The rule is recursive so that
+    // "--a" would parse as "-(-a)" (double negation), though that's
+    // an unusual thing to write.
+    ExprPtr parse_unary() {
+        if (cur().kind == Tok::Minus) {
+            int ln = cur().line;
+            advance();
+            auto operand = parse_unary();
+            return make_expr(UnaryMinusExpr{std::move(operand), ln});
+        }
+        return parse_primary();
+    }
+
+    // primary = INT_LIT | FLOAT_LIT | IDENT "[" expr "]"
+    //         | IDENT "." IDENT | IDENT | "(" expr ")"
     ExprPtr parse_primary() {
         int ln = cur().line;
 
@@ -355,17 +373,26 @@ private:
             }
 
             // Builtin: tid.x, bid.x, bdim.x
+            // Only these three identifiers may appear before a dot.
             if (cur().kind == Tok::Dot) {
-                advance();
-                std::string field = expect_ident();
-                std::string full = name + "." + field;
-
-                // Only three builtins are valid.
-                if (full != "tid.x" && full != "bid.x" && full != "bdim.x") {
+                // Validate the base name before consuming the dot.
+                if (name != "tid" && name != "bid" && name != "bdim") {
                     throw std::runtime_error(
                         "line " + std::to_string(ln) +
-                        ": unknown builtin '" + full + "'");
+                        ": unknown builtin base '" + name +
+                        "'; only tid, bid, bdim are allowed");
                 }
+                advance();  // consume the dot
+                std::string field = expect_ident();
+
+                // Only the .x component is supported.
+                if (field != "x") {
+                    throw std::runtime_error(
+                        "line " + std::to_string(ln) +
+                        ": unknown builtin '" + name + "." + field +
+                        "'; only .x is supported");
+                }
+                std::string full = name + "." + field;
                 return make_expr(BuiltinExpr{std::move(full), ln});
             }
 
