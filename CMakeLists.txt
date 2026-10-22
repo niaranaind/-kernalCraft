@@ -32,9 +32,12 @@ add_executable(test_phase4 tests/test_phase4.cpp)
 target_link_libraries(test_phase4 miniptx_core)
 add_test(NAME phase4 COMMAND test_phase4)
 
-# Optional: GPU runtime loader (needs CUDA toolkit; build on the DGX)
+# Optional: GPU runtime loader & benchmark (needs CUDA toolkit; build on the DGX)
 find_package(CUDAToolkit QUIET)
 if(CUDAToolkit_FOUND)
   add_executable(run_ptx runtime/run_ptx.cpp)
   target_link_libraries(run_ptx CUDA::cuda_driver)
+
+  add_executable(benchmark runtime/benchmark.cpp)
+  target_link_libraries(benchmark CUDA::cuda_driver)
 endif()

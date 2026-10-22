@@ -235,9 +235,40 @@ ptxas -lineinfo -m64 -arch=sm_70 build_dgx/saxpy.ptx -o build_dgx/saxpy.cubin
 cuobjdump -elf build_dgx/saxpy.cubin | grep -i debug
 
 # 3. Disassemble SASS instructions with interleaved source lines
-nvdisasm -g build_dgx/saxpy.cubin
+nvdisasm -c -g build_dgx/saxpy.cubin
 ```
 *(Note: Inspecting the cubin sections and SASS disassembly via `cuobjdump` and `nvdisasm` is **unverified until run on the DGX**).*
+
+## Micro-Benchmark: MiniPTX vs. Hand-Written CUDA (Phase 4c)
+
+To evaluate code generation quality, we benchmark the MiniPTX emitted `saxpy` kernel against an idiomatic hand-written CUDA kernel (`__global__ void saxpy(float a, const float* __restrict__ x, float* __restrict__ y, int n)`) compiled with `nvcc -ptx -arch=sm_70 -O3`.
+
+### Benchmark Configuration
+- **Hardware Target**: NVIDIA Tesla V100-SXM2-32GB (`sm_70`, 6 MiB L2 cache).
+- **Workload**: SAXPY on $N = 2^{24} = 16,777,216$ `float` elements.
+  - Footprint in GPU memory: $\approx 128\text{ MiB}$ (vectors $x$ and $y$).
+  - Memory traffic per launch: $192\text{ MiB}$ ($3 \times N \times 4\text{ bytes}$ for read $x$, read $y$, write $y$).
+  - Because 128 MiB far exceeds the 6 MiB L2 cache, this forces memory traffic out to HBM2 DRAM.
+- **Rigor & Methodology**:
+  - Pure CUDA Driver API execution (`cuEvent*`, `cuLaunchKernel`) through the identical C++ harness and launch configuration (256 threads/block, 65,536 blocks).
+  - Both kernels verified against single-precision CPU references on fresh buffers before timing.
+  - **Alternating A/B Execution**: Kernels alternate launches (A, B, A, B, ...) to prevent thermal or dynamic power-state skew.
+  - 10 warmup iterations followed by 50 timed iterations using high-precision GPU hardware events (`cuEventElapsedTime`).
+  - Target: `CUDA_VISIBLE_DEVICES=0` on shared DGX server.
+
+### Results on Tesla V100
+
+```bash
+bash scripts/benchmark_dgx.sh
+```
+
+| Implementation | PTX Instructions | Median Time (ms) | Min Time (ms) | Max Time (ms) | StdDev (ms) | Effective BW (GB/s) |
+|---|---|---|---|---|---|---|
+| **MiniPTX** (emitted PTX) | *Unverified* | *Unverified* | *Unverified* | *Unverified* | *Unverified* | *Unverified* |
+| **CUDA** (`nvcc -O3` PTX) | *Unverified* | *Unverified* | *Unverified* | *Unverified* | *Unverified* | *Unverified* |
+
+> [!NOTE]
+> Benchmark numbers will be populated once executed on the DGX. Note that the DGX GPUs are shared with other concurrent users. Effective bandwidth is computed as $\frac{3 \times N \times 4\text{ bytes}}{\text{median\_time (s)} \times 10^9}$.
 
 ## Build & Test Locally (macOS)
 ```bash
