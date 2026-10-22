@@ -1,11 +1,116 @@
 # MiniPTX
 
-A small C++17 compiler from a tiny C-like GPU kernel language to NVIDIA PTX,
-with a runtime loader (CUDA Driver API), a simple module linker, and
-source-line debug info. Written from scratch (no LLVM/ANTLR).
+A small C++17 compiler translating a tiny C-like GPU kernel language to NVIDIA PTX (`sm_70`), featuring source-line debug info and a pure CUDA Driver API runtime.
+Written entirely from scratch without external parser generators, LLVM, or third-party compiler frameworks.
 
 ## Pipeline
-source -> lexer -> parser/AST -> type check -> 3-address IR -> optimization passes -> PTX -> ptxas -> run on GPU
+
+`source` $\to$ `lexer` $\to$ `parser / AST` $\to$ `type checker` $\to$ `3-address IR` $\to$ `optimization passes` $\to$ `PTX emitter` $\to$ `ptxas` $\to$ `GPU execution`
+
+## Build & Test Locally (macOS / Linux)
+
+Prerequisites: CMake 3.16+ and a C++17 compiler (`clang++` or `g++`).
+
+```bash
+# Configure and build all compiler targets and CPU test suites
+cmake -S . -B build && cmake --build build
+
+# Run all CPU verification tests (84 tests across Phases 1-4a)
+ctest --test-dir build --output-on-failure
+```
+
+## Usage
+
+```bash
+./build/miniptxc examples/saxpy.mk                # compile kernel to PTX (with .file / .loc debug directives)
+./build/miniptxc --no-lineinfo examples/saxpy.mk   # compile kernel to clean PTX without debug directives
+./build/miniptxc --map examples/saxpy.mk          # print interleaved source-line to PTX mapping
+./build/miniptxc --dump-ast examples/saxpy.mk      # print the parsed AST
+./build/miniptxc --dump-ir examples/saxpy.mk       # print the optimized 3-address IR
+```
+
+## Micro-Benchmark: MiniPTX vs. Hand-Written CUDA (Phase 4c)
+
+To evaluate code generation quality, we benchmark MiniPTX against idiomatic hand-written CUDA compiled with `nvcc -ptx -arch=sm_70 -O3`.
+
+### Benchmark 1: SAXPY (Memory-Bound)
+
+- **Hardware Target**: NVIDIA Tesla V100-SXM2-32GB (`sm_70`, 6 MiB L2 cache, shared cluster).
+- **Workload**: SAXPY on $N = 2^{24} = 16,777,216$ `float` elements (128 MiB memory footprint, 192 MiB DRAM traffic).
+- **Methodology**:
+  - Pure CUDA Driver API execution (`cuEvent*`, `cuLaunchKernel`) through the identical harness and launch configuration (256 threads/block, 65,536 blocks).
+  - Both kernels verified against single-precision CPU references on fresh buffers before timing.
+  - Alternating A/B timed iterations on shared GPU 0 using high-precision GPU hardware events (`cuEventElapsedTime`).
+
+#### Results on Tesla V100
+
+| Implementation | PTX Instructions | SASS Instructions | Median Time (ms) | Effective BW (GB/s) | Relative Ratio |
+|---|---|---|---|---|---|
+| **MiniPTX** (emitted PTX) | 36 | 24 | 0.2570 ms | 783.2988 GB/s | 1.000x |
+| **CUDA** (`nvcc -O3` PTX) | 20 | 16 | 0.2570 ms | 783.2988 GB/s | 1.000x |
+
+> [!NOTE]
+> **Observation**: Both MiniPTX and `nvcc -O3` achieve an identical median runtime of `0.2570 ms` (`783.2988 GB/s`). SAXPY has an arithmetic intensity of $0.167\text{ FLOP/byte}$, which completely saturates the Volta HBM2 memory subsystem. Because memory bandwidth is the bottleneck, the difference in instruction counts (36 vs 20 PTX, 24 vs 16 SASS) does not impact execution time.
+
+### Benchmark 2: Compute-Heavy (N = 2^24 elements, 64-iter inner loop)
+
+- **Workload**: $N = 2^{24}$ elements with an inner loop executing 64 multiply-add operations per element ($v = v \times a + 0.5$).
+- **Characterization**: Described as "compute-heavy" (rather than strictly arithmetic-bound) because it also loads and stores $N$ elements across global memory.
+- **Fair Comparison**: Identical Driver API loader, launch configuration (256 threads/block, 65,536 blocks), alternating execution, and CPU reference verification.
+
+#### Results on Tesla V100 (Run 3)
+
+| Implementation | PTX Instructions | SASS Instructions | Median Time (ms) | Throughput (GFLOPS) | Relative Ratio |
+|---|---|---|---|---|---|
+| **MiniPTX** (emitted PTX) | 54 | 24 | 0.4874 ms | 4405.8 GFLOPS | 1.123x (12.26% slower) |
+| **CUDA** (`nvcc -O3` PTX) | 28 | 32 | 0.4342 ms | 4946.1 GFLOPS | 1.000x (baseline) |
+| **CUDA no-FMA** (`nvcc -O3 --fmad=false`) | 29 | 32 | 0.4884 ms | 4396.5 GFLOPS | 0.998x (0.21% diff) |
+
+#### SASS Opcode & Loop Structure Breakdown (Verified)
+
+| Implementation | Total SASS | FFMA | FMUL | FADD | Loop Structure (Heuristic) |
+|---|---|---|---|---|---|
+| **MiniPTX** (emitted PTX) | 24 | 0 | 1 | 1 | Rolled loop |
+| **CUDA** (`nvcc -O3` PTX) | 32 | 1 | 0 | 0 | Rolled loop |
+| **CUDA no-FMA** (`nvcc -O3 --fmad=false`) | 32 | 0 | 1 | 1 | Rolled loop |
+
+> [!NOTE]
+> **Key Findings & Performance Analysis**:
+> 1. **FMA Contraction Explains the Gap**:
+>    - MiniPTX emits explicit `mul.rn.f32` and `add.rn.f32` (two separate, dependent operations per iteration: `FMUL` followed by `FADD`).
+>    - Default `nvcc -O3` contracts the multiply and add into a single fused multiply-add instruction (`FFMA`), executing 1 arithmetic operation per loop iteration instead of 2.
+>    - When `nvcc` is compiled with `--fmad=false`, it also emits `FMUL` and `FADD` (0 FFMA, 1 FMUL, 1 FADD), and its runtime matches MiniPTX within measurement noise (`0.4874 ms` vs `0.4884 ms`, a `0.21%` difference).
+>    - Hardware FMA contraction delivers an `11.11%` speedup to `nvcc` (`0.889x`), accounting for the entire observed performance difference.
+> 2. **Loop Unrolling Ruled Out**:
+>    - The SASS inspection confirms all three implementations preserve a rolled loop with 1 backward branch and a single arithmetic sequence per loop. This rules out unrolling as a contributing factor. *(Note: the "rolled/unrolled" check is a heuristic based on instruction and branch counts).*
+> 3. **SASS Instruction Count Does Not Predict Speed**:
+>    - MiniPTX has 24 total SASS instructions while the `--fmad=false` CUDA control has 32, yet both exhibit identical execution time (~0.487 ms - 0.488 ms). Static instruction count does not predict execution speed when loop execution cycles dominate.
+
+#### Multi-Run Measurement Stability (Shared DGX Cluster)
+
+| Run | MiniPTX Time (ms) | CUDA -O3 Time (ms) | CUDA no-FMA Time (ms) | Ratio (MiniPTX / CUDA -O3) | Notes |
+|---|---|---|---|---|---|
+| **Run 1** | 0.4721 ms | 0.4209 ms | N/A | **1.122x** | Initial benchmark, no FMA control |
+| **Run 2** | 0.4424 ms | 0.3948 ms | 0.4424 ms | **1.121x** | Added `--fmad=false` diagnostic |
+| **Run 3** | 0.4874 ms | 0.4342 ms | 0.4884 ms | **1.123x** | Full diagnostic with SASS opcode counts |
+
+Absolute execution times varied across runs on the shared DGX cluster (e.g. MiniPTX between `0.4424 ms` and `0.4874 ms`) due to concurrent user workloads and GPU thermal/power states. However, the comparative ratio between MiniPTX and default CUDA remained remarkably stable at **1.121x – 1.123x**.
+
+### Running Benchmarks on the DGX
+```bash
+bash scripts/benchmark_dgx.sh
+# or override host compiler for nvcc if needed:
+NVCC_CCBIN=/usr/bin/g++ bash scripts/benchmark_dgx.sh
+```
+
+## Limitations & Future Work
+
+The current implementation focuses on core compiler architecture and clean code generation for standalone kernels:
+- **Helper Functions & Module Linker (Phase 4b)**: Not implemented yet; programs currently consist of a single top-level `kernel`. Function declarations (`func`) and inter-module symbol resolution are upcoming.
+- **Value Representation**: The IR uses single-assignment expression temporaries with dedicated mutable variable register slots rather than full SSA form with $\phi$ (phi) nodes.
+- **Block-Local Optimization**: Optimization passes (constant folding, dead code elimination, common subexpression elimination) operate strictly within individual basic blocks without global cross-block dataflow analysis or loop-invariant code motion (LICM).
+- **Strict Typing & No Typecasts**: There are no implicit type conversions between `int` and `float` and no explicit cast operator syntax. Operands must strictly share identical scalar types.
+- **Single Compilation Unit**: Only one kernel can be compiled per execution.
 
 ## Language Specification
 
@@ -23,7 +128,7 @@ Write `n + 1` instead.  There is no cast syntax.
 the indexing operator `p[i]`; they cannot appear in arithmetic or comparison
 expressions.
 
-### Built-in read-only values
+### Built-in Read-Only Values
 - `tid.x`  — thread index within the block (like `threadIdx.x` in CUDA)
 - `bid.x`  — block index within the grid   (like `blockIdx.x`  in CUDA)
 - `bdim.x` — number of threads per block   (like `blockDim.x`  in CUDA)
@@ -246,97 +351,6 @@ cuobjdump -elf build_dgx/saxpy.cubin | grep -i debug
 nvdisasm -c -g build_dgx/saxpy.cubin
 ```
 *(Verified on DGX Tesla V100: `cuobjdump -elf` confirms both `.debug_line` and `.nv_debug_line_sass` sections are emitted).*
-
-## Micro-Benchmark: MiniPTX vs. Hand-Written CUDA (Phase 4c)
-
-To evaluate code generation quality, we benchmark MiniPTX against idiomatic hand-written CUDA compiled with `nvcc -ptx -arch=sm_70 -O3`.
-
-### Benchmark 1: SAXPY (Memory-Bound)
-
-- **Hardware Target**: NVIDIA Tesla V100-SXM2-32GB (`sm_70`, 6 MiB L2 cache, shared cluster).
-- **Workload**: SAXPY on $N = 2^{24} = 16,777,216$ `float` elements.
-  - Footprint in GPU memory: $\approx 128\text{ MiB}$ (vectors $x$ and $y$).
-  - Memory traffic per launch: $192\text{ MiB}$ ($3 \times N \times 4\text{ bytes}$ for read $x$, read $y$, write $y$).
-  - Exceeds the 6 MiB L2 cache, streaming data directly through HBM2 DRAM.
-- **Methodology**:
-  - Pure CUDA Driver API execution (`cuEvent*`, `cuLaunchKernel`) through the identical harness and launch configuration (256 threads/block, 65,536 blocks).
-  - Both kernels verified against single-precision CPU references on fresh buffers before timing.
-  - Alternating A/B timed iterations on shared GPU 0 using high-precision GPU hardware events (`cuEventElapsedTime`).
-
-#### Results on Tesla V100
-
-| Implementation | PTX Instructions | SASS Instructions | Median Time (ms) | Effective BW (GB/s) | Relative Ratio |
-|---|---|---|---|---|---|
-| **MiniPTX** (emitted PTX) | 36 | 24 | 0.2570 ms | 783.2988 GB/s | 1.000x |
-| **CUDA** (`nvcc -O3` PTX) | 20 | 16 | 0.2570 ms | 783.2988 GB/s | 1.000x |
-
-> [!NOTE]
-> **Observation**: Both MiniPTX and `nvcc -O3` achieve an identical median runtime of `0.2570 ms` (`783.2988 GB/s`). SAXPY has an arithmetic intensity of $0.167\text{ FLOP/byte}$, which completely saturates the Volta HBM2 memory subsystem. Because memory bandwidth is the bottleneck, the difference in instruction counts (36 vs 20 PTX, 24 vs 16 SASS) does not impact execution time.
-
-### Benchmark 2: Compute-Heavy (N = 2^24 elements, 64-iter inner loop)
-
-- **Workload**: $N = 2^{24}$ elements with an inner loop executing 64 multiply-add operations per element ($v = v \times a + 0.5$).
-- **Characterization**: Described as "compute-heavy" (rather than strictly arithmetic-bound) because it also loads and stores $N$ elements across global memory.
-- **Fair Comparison**: Identical Driver API loader, launch configuration (256 threads/block, 65,536 blocks), alternating execution, and CPU reference verification.
-
-#### Results on Tesla V100 (Run 3)
-
-| Implementation | PTX Instructions | SASS Instructions | Median Time (ms) | Throughput (GFLOPS) | Relative Ratio |
-|---|---|---|---|---|---|
-| **MiniPTX** (emitted PTX) | 54 | 24 | 0.4874 ms | 4405.8 GFLOPS | 1.123x (12.26% slower) |
-| **CUDA** (`nvcc -O3` PTX) | 28 | 32 | 0.4342 ms | 4946.1 GFLOPS | 1.000x (baseline) |
-| **CUDA no-FMA** (`nvcc -O3 --fmad=false`) | 29 | 32 | 0.4884 ms | 4396.5 GFLOPS | 0.998x (0.21% diff) |
-
-#### SASS Opcode & Loop Structure Breakdown (Verified)
-
-| Implementation | Total SASS | FFMA | FMUL | FADD | Loop Structure (Heuristic) |
-|---|---|---|---|---|---|
-| **MiniPTX** (emitted PTX) | 24 | 0 | 1 | 1 | Rolled loop |
-| **CUDA** (`nvcc -O3` PTX) | 32 | 1 | 0 | 0 | Rolled loop |
-| **CUDA no-FMA** (`nvcc -O3 --fmad=false`) | 32 | 0 | 1 | 1 | Rolled loop |
-
-> [!NOTE]
-> **Key Findings & Performance Analysis**:
-> 1. **FMA Contraction Explains the Gap**:
->    - MiniPTX emits explicit `mul.rn.f32` and `add.rn.f32` (two separate, dependent operations per iteration: `FMUL` followed by `FADD`).
->    - Default `nvcc -O3` contracts the multiply and add into a single fused multiply-add instruction (`FFMA`), executing 1 arithmetic operation per loop iteration instead of 2.
->    - When `nvcc` is compiled with `--fmad=false`, it also emits `FMUL` and `FADD` (0 FFMA, 1 FMUL, 1 FADD), and its runtime matches MiniPTX within measurement noise (`0.4874 ms` vs `0.4884 ms`, a `0.21%` difference).
->    - Hardware FMA contraction delivers an `11.11%` speedup to `nvcc` (`0.889x`), accounting for the entire observed performance difference.
-> 2. **Loop Unrolling Ruled Out**:
->    - The SASS inspection confirms all three implementations preserve a rolled loop with 1 backward branch and a single arithmetic sequence per loop. This rules out unrolling as a contributing factor. *(Note: the "rolled/unrolled" check is a heuristic based on instruction and branch counts).*
-> 3. **SASS Instruction Count Does Not Predict Speed**:
->    - MiniPTX has 24 total SASS instructions while the `--fmad=false` CUDA control has 32, yet both exhibit identical execution time (~0.487 ms - 0.488 ms). Static instruction count does not predict execution speed when loop execution cycles dominate.
-
-#### Multi-Run Measurement Stability (Shared DGX Cluster)
-
-| Run | MiniPTX Time (ms) | CUDA -O3 Time (ms) | CUDA no-FMA Time (ms) | Ratio (MiniPTX / CUDA -O3) | Notes |
-|---|---|---|---|---|---|
-| **Run 1** | 0.4721 ms | 0.4209 ms | N/A | **1.122x** | Initial benchmark, no FMA control |
-| **Run 2** | 0.4424 ms | 0.3948 ms | 0.4424 ms | **1.121x** | Added `--fmad=false` diagnostic |
-| **Run 3** | 0.4874 ms | 0.4342 ms | 0.4884 ms | **1.123x** | Full diagnostic with SASS opcode counts |
-
-Absolute execution times varied across runs on the shared DGX cluster (e.g. MiniPTX between `0.4424 ms` and `0.4874 ms`) due to concurrent user workloads and GPU thermal/power states. However, the comparative ratio between MiniPTX and default CUDA remained remarkably stable at **1.121x – 1.123x**.
-
-### Running Benchmarks on the DGX
-```bash
-bash scripts/benchmark_dgx.sh
-# or override host compiler for nvcc if needed:
-NVCC_CCBIN=/usr/bin/g++ bash scripts/benchmark_dgx.sh
-```
-
-## Build & Test Locally (macOS)
-```bash
-cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure
-```
-
-## Usage
-```bash
-./build/miniptxc examples/saxpy.mk              # compile to PTX (with .loc line info)
-./build/miniptxc --no-lineinfo examples/saxpy.mk # compile to PTX without debug directives
-./build/miniptxc --map examples/saxpy.mk        # print interleaved source-to-PTX map
-./build/miniptxc --dump-ast examples/saxpy.mk    # print the AST
-./build/miniptxc --dump-ir examples/saxpy.mk     # print the optimized IR
-```
 
 ## Roadmap
 - [x] Week 1: lexer, parser, AST, type checker, error messages

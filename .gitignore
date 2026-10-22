@@ -1,3 +1,9 @@
 build/
 build_dgx/
 Testing/
+*.o
+*.cubin
+*.ptx
+.DS_Store
+.vscode/
+.idea/
