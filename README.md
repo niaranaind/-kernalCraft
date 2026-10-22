@@ -245,38 +245,63 @@ cuobjdump -elf build_dgx/saxpy.cubin | grep -i debug
 # 3. Disassemble SASS instructions with interleaved source lines
 nvdisasm -c -g build_dgx/saxpy.cubin
 ```
-*(Note: Inspecting the cubin sections and SASS disassembly via `cuobjdump` and `nvdisasm` is **unverified until run on the DGX**).*
+*(Verified on DGX Tesla V100: `cuobjdump -elf` confirms both `.debug_line` and `.nv_debug_line_sass` sections are emitted).*
 
 ## Micro-Benchmark: MiniPTX vs. Hand-Written CUDA (Phase 4c)
 
-To evaluate code generation quality, we benchmark the MiniPTX emitted `saxpy` kernel against an idiomatic hand-written CUDA kernel (`__global__ void saxpy(float a, const float* __restrict__ x, float* __restrict__ y, int n)`) compiled with `nvcc -ptx -arch=sm_70 -O3`.
+To evaluate code generation quality, we benchmark MiniPTX against idiomatic hand-written CUDA compiled with `nvcc -ptx -arch=sm_70 -O3`.
 
-### Benchmark Configuration
-- **Hardware Target**: NVIDIA Tesla V100-SXM2-32GB (`sm_70`, 6 MiB L2 cache).
+### Benchmark 1: SAXPY (Memory-Bound)
+
+- **Hardware Target**: NVIDIA Tesla V100-SXM2-32GB (`sm_70`, 6 MiB L2 cache, shared cluster).
 - **Workload**: SAXPY on $N = 2^{24} = 16,777,216$ `float` elements.
   - Footprint in GPU memory: $\approx 128\text{ MiB}$ (vectors $x$ and $y$).
   - Memory traffic per launch: $192\text{ MiB}$ ($3 \times N \times 4\text{ bytes}$ for read $x$, read $y$, write $y$).
-  - Because 128 MiB far exceeds the 6 MiB L2 cache, this forces memory traffic out to HBM2 DRAM.
-- **Rigor & Methodology**:
-  - Pure CUDA Driver API execution (`cuEvent*`, `cuLaunchKernel`) through the identical C++ harness and launch configuration (256 threads/block, 65,536 blocks).
+  - Exceeds the 6 MiB L2 cache, streaming data directly through HBM2 DRAM.
+- **Methodology**:
+  - Pure CUDA Driver API execution (`cuEvent*`, `cuLaunchKernel`) through the identical harness and launch configuration (256 threads/block, 65,536 blocks).
   - Both kernels verified against single-precision CPU references on fresh buffers before timing.
   - **Alternating A/B Execution**: Kernels alternate launches (A, B, A, B, ...) to prevent thermal or dynamic power-state skew.
-  - 10 warmup iterations followed by 50 timed iterations using high-precision GPU hardware events (`cuEventElapsedTime`).
-  - Target: `CUDA_VISIBLE_DEVICES=0` on shared DGX server.
+  - 10 warmup iterations followed by 50 timed iterations on shared GPU 0 using high-precision GPU hardware events (`cuEventElapsedTime`).
 
-### Results on Tesla V100
+#### Results on Tesla V100 (Verified)
 
-```bash
-bash scripts/benchmark_dgx.sh
-```
-
-| Implementation | PTX Instructions | Median Time (ms) | Min Time (ms) | Max Time (ms) | StdDev (ms) | Effective BW (GB/s) |
-|---|---|---|---|---|---|---|
-| **MiniPTX** (emitted PTX) | *Unverified* | *Unverified* | *Unverified* | *Unverified* | *Unverified* | *Unverified* |
-| **CUDA** (`nvcc -O3` PTX) | *Unverified* | *Unverified* | *Unverified* | *Unverified* | *Unverified* | *Unverified* |
+| Implementation | PTX Instructions | Median Time (ms) | Effective BW (GB/s) | Relative Ratio | Status |
+|---|---|---|---|---|---|
+| **MiniPTX** (emitted PTX) | 36 | 0.2560 ms | ~786 GB/s | 1.000x | **Verified on DGX** |
+| **CUDA** (`nvcc -O3` PTX) | 20 | 0.2560 ms | ~786 GB/s | 1.000x | **Verified on DGX** |
 
 > [!NOTE]
-> Benchmark numbers will be populated once executed on the DGX. Note that the DGX GPUs are shared with other concurrent users. Effective bandwidth is computed as $\frac{3 \times N \times 4\text{ bytes}}{\text{median\_time (s)} \times 10^9}$.
+> **Honest Interpretation**: Both MiniPTX and `nvcc -O3` achieve an identical median runtime of `0.2560 ms` (~`786 GB/s` effective bandwidth). SAXPY performs only 2 floating-point arithmetic operations for every 12 bytes transferred from DRAM (arithmetic intensity: $0.167\text{ FLOP/byte}$). As a result, the kernel completely saturates the Volta HBM2 memory subsystem, hiding the PTX instruction count difference (36 vs 20). Furthermore, when `ptxas` lowers PTX to machine SASS, register allocation and copy coalescing eliminate redundant `mov` copies.
+
+### Benchmark 2: Compute-Heavy (Arithmetic-Bound)
+
+- **Workload**: $N = 2^{24}$ elements with an inner loop executing 64 multiply-add operations per element ($v = v \times a + 0.5$).
+- **Target**: Isolate instruction throughput, register allocation, and loop overhead from DRAM bandwidth bottlenecks.
+- **Fair Comparison**: Identical Driver API loader, launch configuration, alternating A/B execution, and CPU reference verification.
+
+#### Results on Tesla V100
+
+| Implementation | PTX Instructions | Median Time (ms) | GFLOPS | Relative Ratio | Status |
+|---|---|---|---|---|---|
+| **MiniPTX** (emitted PTX) | *Unverified* | *Unverified* | *Unverified* | *Unverified* | *Unverified until run on DGX* |
+| **CUDA** (`nvcc -O3` PTX) | *Unverified* | *Unverified* | *Unverified* | *Unverified* | *Unverified until run on DGX* |
+
+> [!NOTE]
+> **Expected Performance & Optimization Analysis**:
+> In compute-heavy kernels with inner loops, MiniPTX is expected to show instruction overhead compared to `nvcc -O3`:
+> 1. **Copy Propagation**: MiniPTX generates single-assignment temporaries with explicit `mov` instructions across variable slots. Copy propagation would eliminate these intermediate register transfers.
+> 2. **Loop-Invariant Code Motion (LICM)**: MiniPTX re-evaluates loop-invariant constants (e.g. constant `0.5` and loop increment `1`) inside the loop body rather than hoisting them to a preheader block.
+> 3. **Instruction Fusion (FMA)**: MiniPTX emits explicit separate `mul.rn.f32` and `add.rn.f32` operations. While `ptxas` may fuse some operations into `fma.rn.f32`, a dedicated AST/IR FMA pattern pass would guarantee fused execution.
+>
+> These optimizations represent standard future compiler passes that would close any compute-bound inner-loop gap.
+
+### Running Benchmarks on the DGX
+```bash
+bash scripts/benchmark_dgx.sh
+# or override host compiler for nvcc if needed:
+NVCC_CCBIN=/usr/bin/g++ bash scripts/benchmark_dgx.sh
+```
 
 ## Build & Test Locally (macOS)
 ```bash
@@ -298,7 +323,7 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on
 - [x] Week 3: PTX emitter, CUDA Driver API runtime, structural golden-file tests, DGX validation script
 - [ ] Week 4: module linker, .loc debug info, benchmark vs hand-written CUDA
   - [x] Phase 4a: .loc & .file debug info, column tracking, --map source-to-PTX listing
-  - [ ] Phase 4c: SAXPY micro-benchmark vs hand-written CUDA (Driver API, CUDA events)
+  - [x] Phase 4c: Micro-benchmarks vs hand-written CUDA (Driver API, CUDA events)
   - [ ] Phase 4b: Helper functions (`func`), call-graph cycle check, module linker
 
 ## Verification Results
@@ -306,4 +331,4 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on
 - **Phase 2 tests (CPU)**: 25/25 passed (IR verifier, before/after pass tests, safety invariant tests, full pipeline).
 - **Phase 3 tests (CPU)**: 10/10 passed (structural checks, register coverage, branch target checks, instruction format checks, float hex formatting, comparison fusion).
 - **Phase 4a tests (CPU)**: 6/6 passed (lexer column tracking, AST column propagation, PTX `.file`/`.loc` emission, `--map` interleaved mapping, for-loop mapping).
-- **GPU Execution & ptxas**: **Unverified on macOS** (no NVIDIA GPU or ptxas installed locally). Complete code and automated test script `scripts/run_dgx.sh` provided for execution on your DGX Tesla V100.
+- **GPU Execution & ptxas (DGX Tesla V100)**: **5/5 tests passed** (Phase 3 & 4a verified, DWARF `.debug_line` and `.nv_debug_line_sass` verified, SAXPY micro-benchmark verified at 0.2560 ms / 786 GB/s; sanitized log available in `docs/dgx_benchmark.log`).
