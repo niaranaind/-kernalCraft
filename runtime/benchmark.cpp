@@ -36,10 +36,12 @@
 #define CUDA_CHECK(expr) CUDA_CHECK_RET(expr, false)
 #define CUDA_CHECK_MAIN(expr) CUDA_CHECK_RET(expr, 1)
 
-static std::string read_file(const std::string& path) {
+static std::string read_file(const std::string& path, bool required = true) {
     std::ifstream in(path);
     if (!in) {
-        std::cerr << "error: cannot open file '" << path << "'\n";
+        if (required) {
+            std::cerr << "error: cannot open file '" << path << "'\n";
+        }
         return "";
     }
     std::stringstream ss;
@@ -112,19 +114,21 @@ static BenchmarkStats compute_stats(std::vector<float> times) {
     return s;
 }
 
-static void print_verdict(float ratio) {
-    std::cout << "Relative Runtime (MiniPTX / CUDA nvcc -O3): "
+static void print_verdict(const std::string& label_a, const std::string& label_b, float ratio) {
+    std::cout << "Relative Runtime (" << label_a << " / " << label_b << "): "
               << std::fixed << std::setprecision(3) << ratio << "x\n";
     float diff_pct = std::abs(ratio - 1.0f) * 100.0f;
     if (diff_pct <= 5.0f) {
-        std::cout << "  => Verdict: MiniPTX performance matches nvcc -O3 within 5% (measured diff: "
-                  << std::setprecision(2) << diff_pct << "%).\n";
+        std::cout << "  => Verdict: " << label_a << " performance matches " << label_b
+                  << " within 5% (measured diff: " << std::setprecision(2) << diff_pct << "%).\n";
     } else if (ratio < 1.0f) {
-        std::cout << "  => Verdict: MiniPTX is " << std::setprecision(2) << (1.0f - ratio) * 100.0f
-                  << "% faster than nvcc -O3 (" << std::setprecision(3) << ratio << "x).\n";
+        std::cout << "  => Verdict: " << label_a << " is " << std::setprecision(2)
+                  << (1.0f - ratio) * 100.0f << "% faster than " << label_b
+                  << " (" << std::setprecision(3) << ratio << "x).\n";
     } else {
-        std::cout << "  => Verdict: MiniPTX is " << std::setprecision(2) << (ratio - 1.0f) * 100.0f
-                  << "% slower than nvcc -O3 (" << std::setprecision(3) << ratio << "x).\n";
+        std::cout << "  => Verdict: " << label_a << " is " << std::setprecision(2)
+                  << (ratio - 1.0f) * 100.0f << "% slower than " << label_b
+                  << " (" << std::setprecision(3) << ratio << "x).\n";
     }
 }
 
@@ -287,7 +291,7 @@ static bool run_saxpy_benchmark(const std::string& miniptx_ptx, const std::strin
     std::cout << "  ------------------------------------------------------------------------------------------\n\n";
 
     float ratio = stats_a.median_ms / stats_b.median_ms;
-    print_verdict(ratio);
+    print_verdict("MiniPTX", "CUDA nvcc -O3", ratio);
 
     CUDA_CHECK(cuEventDestroy(start_a));
     CUDA_CHECK(cuEventDestroy(stop_a));
@@ -302,19 +306,28 @@ static bool run_saxpy_benchmark(const std::string& miniptx_ptx, const std::strin
 }
 
 // ---------------------------------------------------------------------------
-// Benchmark 2: Compute-Heavy (Arithmetic-Bound, Inner Loop)
+// Benchmark 2: Compute-Heavy (Inner Loop, N = 2^24 elements, 64 iters)
 // ---------------------------------------------------------------------------
-static bool run_compute_benchmark(const std::string& miniptx_ptx, const std::string& cuda_ptx) {
+static bool run_compute_benchmark(const std::string& miniptx_ptx,
+                                  const std::string& cuda_ptx,
+                                  const std::string& cuda_nofma_ptx = "") {
+    bool has_nofma = !cuda_nofma_ptx.empty();
+
     std::cout << "=================================================================\n";
-    std::cout << " Benchmark 2: Compute-Heavy (Arithmetic-Bound, N = 2^24, 64 iters)\n";
+    std::cout << " Benchmark 2: Compute-Heavy (N = 2^24 elements, 64-iter inner loop)\n";
     std::cout << "=================================================================\n\n";
 
-    int miniptx_instr_count = count_ptx_instructions(miniptx_ptx);
-    int cuda_instr_count    = count_ptx_instructions(cuda_ptx);
+    int miniptx_instr_count    = count_ptx_instructions(miniptx_ptx);
+    int cuda_instr_count       = count_ptx_instructions(cuda_ptx);
+    int cuda_nofma_instr_count = has_nofma ? count_ptx_instructions(cuda_nofma_ptx) : 0;
 
     std::cout << "PTX Instruction Counts (kernel body):\n";
-    std::cout << "  - MiniPTX:                    " << miniptx_instr_count << " instructions\n";
-    std::cout << "  - Hand-written CUDA (nvcc -O3): " << cuda_instr_count << " instructions\n\n";
+    std::cout << "  - MiniPTX:                           " << miniptx_instr_count << " instructions\n";
+    std::cout << "  - Hand-written CUDA (nvcc -O3):        " << cuda_instr_count << " instructions\n";
+    if (has_nofma) {
+        std::cout << "  - CUDA no-FMA (nvcc -O3 --fmad=false): " << cuda_nofma_instr_count << " instructions\n";
+    }
+    std::cout << "\n";
 
     const int N = 1 << 24;
     const int iters = 64;
@@ -322,14 +335,16 @@ static bool run_compute_benchmark(const std::string& miniptx_ptx, const std::str
 
     char err_log_a[2048] = {0};
     char err_log_b[2048] = {0};
+    char err_log_c[2048] = {0};
     CUjit_option jit_options[] = {
         CU_JIT_ERROR_LOG_BUFFER,
         CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES
     };
     void* jit_opt_vals_a[] = { err_log_a, reinterpret_cast<void*>(sizeof(err_log_a)) };
     void* jit_opt_vals_b[] = { err_log_b, reinterpret_cast<void*>(sizeof(err_log_b)) };
+    void* jit_opt_vals_c[] = { err_log_c, reinterpret_cast<void*>(sizeof(err_log_c)) };
 
-    CUmodule mod_a, mod_b;
+    CUmodule mod_a = nullptr, mod_b = nullptr, mod_c = nullptr;
     if (cuModuleLoadDataEx(&mod_a, miniptx_ptx.c_str(), 2, jit_options, jit_opt_vals_a) != CUDA_SUCCESS) {
         std::cerr << "error: failed to load MiniPTX compute_heavy module:\n" << err_log_a << "\n";
         return false;
@@ -339,10 +354,21 @@ static bool run_compute_benchmark(const std::string& miniptx_ptx, const std::str
         cuModuleUnload(mod_a);
         return false;
     }
+    if (has_nofma) {
+        if (cuModuleLoadDataEx(&mod_c, cuda_nofma_ptx.c_str(), 2, jit_options, jit_opt_vals_c) != CUDA_SUCCESS) {
+            std::cerr << "error: failed to load CUDA no-FMA compute_heavy module:\n" << err_log_c << "\n";
+            cuModuleUnload(mod_a);
+            cuModuleUnload(mod_b);
+            return false;
+        }
+    }
 
-    CUfunction fn_a, fn_b;
+    CUfunction fn_a, fn_b, fn_c = nullptr;
     CUDA_CHECK(cuModuleGetFunction(&fn_a, mod_a, "compute_heavy"));
     CUDA_CHECK(cuModuleGetFunction(&fn_b, mod_b, "compute_heavy"));
+    if (has_nofma) {
+        CUDA_CHECK(cuModuleGetFunction(&fn_c, mod_c, "compute_heavy"));
+    }
 
     std::vector<float> h_x(N), h_ref(N), h_y_verify(N);
     const float a_val = 1.0001f;
@@ -379,10 +405,11 @@ static bool run_compute_benchmark(const std::string& miniptx_ptx, const std::str
             cuMemFree(d_y);
             cuModuleUnload(mod_a);
             cuModuleUnload(mod_b);
+            if (mod_c) cuModuleUnload(mod_c);
             return false;
         }
     }
-    std::cout << "  MiniPTX compute_heavy: [PASS] Correct against CPU reference.\n";
+    std::cout << "  MiniPTX compute_heavy:     [PASS] Correct against CPU reference.\n";
 
     CUDA_CHECK(cuLaunchKernel(fn_b, grid_size, 1, 1, block_size, 1, 1, 0, nullptr, kernel_args, nullptr));
     CUDA_CHECK(cuCtxSynchronize());
@@ -394,31 +421,59 @@ static bool run_compute_benchmark(const std::string& miniptx_ptx, const std::str
             cuMemFree(d_y);
             cuModuleUnload(mod_a);
             cuModuleUnload(mod_b);
+            if (mod_c) cuModuleUnload(mod_c);
             return false;
         }
     }
-    std::cout << "  CUDA compute_heavy:    [PASS] Correct against CPU reference.\n\n";
+    std::cout << "  CUDA compute_heavy (O3):   [PASS] Correct against CPU reference.\n";
+
+    if (has_nofma) {
+        CUDA_CHECK(cuLaunchKernel(fn_c, grid_size, 1, 1, block_size, 1, 1, 0, nullptr, kernel_args, nullptr));
+        CUDA_CHECK(cuCtxSynchronize());
+        CUDA_CHECK(cuMemcpyDtoH(h_y_verify.data(), d_y, bytes));
+        for (int i = 0; i < N; ++i) {
+            if (std::abs(h_y_verify[i] - h_ref[i]) > 1e-2f * std::abs(h_ref[i])) {
+                std::cerr << "Verification failed for CUDA no-FMA compute_heavy at index " << i << "\n";
+                cuMemFree(d_x);
+                cuMemFree(d_y);
+                cuModuleUnload(mod_a);
+                cuModuleUnload(mod_b);
+                cuModuleUnload(mod_c);
+                return false;
+            }
+        }
+        std::cout << "  CUDA no-FMA compute_heavy: [PASS] Correct against CPU reference.\n";
+    }
+    std::cout << "\n";
 
     // 2. Warm-up (10 alternating iterations)
     std::cout << "--- Warm-up (10 alternating iterations) ---\n";
     for (int i = 0; i < 10; ++i) {
         CUDA_CHECK(cuLaunchKernel(fn_a, grid_size, 1, 1, block_size, 1, 1, 0, nullptr, kernel_args, nullptr));
         CUDA_CHECK(cuLaunchKernel(fn_b, grid_size, 1, 1, block_size, 1, 1, 0, nullptr, kernel_args, nullptr));
+        if (has_nofma) {
+            CUDA_CHECK(cuLaunchKernel(fn_c, grid_size, 1, 1, block_size, 1, 1, 0, nullptr, kernel_args, nullptr));
+        }
     }
     CUDA_CHECK(cuCtxSynchronize());
 
     // 3. Timed Runs (50 alternating iterations with cuEvent*)
     const int num_runs = 50;
     std::cout << "--- Timed Runs (" << num_runs << " alternating iterations) ---\n";
-    CUevent start_a, stop_a, start_b, stop_b;
+    CUevent start_a, stop_a, start_b, stop_b, start_c, stop_c;
     CUDA_CHECK(cuEventCreate(&start_a, CU_EVENT_DEFAULT));
     CUDA_CHECK(cuEventCreate(&stop_a,  CU_EVENT_DEFAULT));
     CUDA_CHECK(cuEventCreate(&start_b, CU_EVENT_DEFAULT));
     CUDA_CHECK(cuEventCreate(&stop_b,  CU_EVENT_DEFAULT));
+    if (has_nofma) {
+        CUDA_CHECK(cuEventCreate(&start_c, CU_EVENT_DEFAULT));
+        CUDA_CHECK(cuEventCreate(&stop_c,  CU_EVENT_DEFAULT));
+    }
 
-    std::vector<float> times_a, times_b;
+    std::vector<float> times_a, times_b, times_c;
     times_a.reserve(num_runs);
     times_b.reserve(num_runs);
+    if (has_nofma) times_c.reserve(num_runs);
 
     for (int i = 0; i < num_runs; ++i) {
         CUDA_CHECK(cuEventRecord(start_a, 0));
@@ -436,6 +491,16 @@ static bool run_compute_benchmark(const std::string& miniptx_ptx, const std::str
         float ms_b = 0.0f;
         CUDA_CHECK(cuEventElapsedTime(&ms_b, start_b, stop_b));
         times_b.push_back(ms_b);
+
+        if (has_nofma) {
+            CUDA_CHECK(cuEventRecord(start_c, 0));
+            CUDA_CHECK(cuLaunchKernel(fn_c, grid_size, 1, 1, block_size, 1, 1, 0, nullptr, kernel_args, nullptr));
+            CUDA_CHECK(cuEventRecord(stop_c, 0));
+            CUDA_CHECK(cuEventSynchronize(stop_c));
+            float ms_c = 0.0f;
+            CUDA_CHECK(cuEventElapsedTime(&ms_c, start_c, stop_c));
+            times_c.push_back(ms_c);
+        }
     }
 
     BenchmarkStats stats_a = compute_stats(times_a);
@@ -447,32 +512,62 @@ static bool run_compute_benchmark(const std::string& miniptx_ptx, const std::str
 
     std::cout << std::fixed << std::setprecision(4);
     std::cout << "Compute-Heavy Execution Times (ms):\n";
-    std::cout << "  ------------------------------------------------------------------------------------------\n";
-    std::cout << "  Implementation          | Median (ms) | Min (ms)  | Max (ms)  | StdDev (ms) | GFLOPS      \n";
-    std::cout << "  ------------------------------------------------------------------------------------------\n";
-    std::cout << "  MiniPTX (emitted PTX)   | " << std::setw(11) << stats_a.median_ms
+    std::cout << "  -------------------------------------------------------------------------------------------------------\n";
+    std::cout << "  Implementation                      | Median (ms) | Min (ms)  | Max (ms)  | StdDev (ms) | GFLOPS      \n";
+    std::cout << "  -------------------------------------------------------------------------------------------------------\n";
+    std::cout << "  MiniPTX (emitted PTX)               | " << std::setw(11) << stats_a.median_ms
               << " | " << std::setw(9) << stats_a.min_ms
               << " | " << std::setw(9) << stats_a.max_ms
               << " | " << std::setw(11) << stats_a.stddev_ms
               << " | " << std::setw(9) << gflops_a << " \n";
-    std::cout << "  CUDA (nvcc -O3 PTX)     | " << std::setw(11) << stats_b.median_ms
+    std::cout << "  CUDA (nvcc -O3 PTX)                 | " << std::setw(11) << stats_b.median_ms
               << " | " << std::setw(9) << stats_b.min_ms
               << " | " << std::setw(9) << stats_b.max_ms
               << " | " << std::setw(11) << stats_b.stddev_ms
               << " | " << std::setw(9) << gflops_b << " \n";
-    std::cout << "  ------------------------------------------------------------------------------------------\n\n";
 
-    float ratio = stats_a.median_ms / stats_b.median_ms;
-    print_verdict(ratio);
+    if (has_nofma) {
+        BenchmarkStats stats_c = compute_stats(times_c);
+        float gflops_c = static_cast<float>((total_flops / (static_cast<double>(stats_c.median_ms) / 1000.0)) / 1e9);
+        std::cout << "  CUDA no-FMA (nvcc -O3 --fmad=false) | " << std::setw(11) << stats_c.median_ms
+                  << " | " << std::setw(9) << stats_c.min_ms
+                  << " | " << std::setw(9) << stats_c.max_ms
+                  << " | " << std::setw(11) << stats_c.stddev_ms
+                  << " | " << std::setw(9) << gflops_c << " \n";
+    }
+    std::cout << "  -------------------------------------------------------------------------------------------------------\n\n";
+
+    float ratio_ab = stats_a.median_ms / stats_b.median_ms;
+    print_verdict("MiniPTX", "CUDA nvcc -O3", ratio_ab);
+
+    if (has_nofma) {
+        BenchmarkStats stats_c = compute_stats(times_c);
+        float ratio_ac = stats_a.median_ms / stats_c.median_ms;
+        print_verdict("MiniPTX", "CUDA no-FMA (--fmad=false)", ratio_ac);
+
+        float ratio_bc = stats_b.median_ms / stats_c.median_ms;
+        std::cout << "FMA Diagnostic: CUDA (nvcc -O3 with FMA) vs CUDA no-FMA (--fmad=false):\n";
+        std::cout << "  Ratio: " << std::fixed << std::setprecision(3) << ratio_bc << "x (";
+        if (ratio_bc < 1.0f) {
+            std::cout << std::setprecision(2) << (1.0f - ratio_bc) * 100.0f << "% speedup from hardware FMA fusion)\n";
+        } else {
+            std::cout << std::setprecision(2) << (ratio_bc - 1.0f) * 100.0f << "% slowdown)\n";
+        }
+    }
 
     CUDA_CHECK(cuEventDestroy(start_a));
     CUDA_CHECK(cuEventDestroy(stop_a));
     CUDA_CHECK(cuEventDestroy(start_b));
     CUDA_CHECK(cuEventDestroy(stop_b));
+    if (has_nofma) {
+        CUDA_CHECK(cuEventDestroy(start_c));
+        CUDA_CHECK(cuEventDestroy(stop_c));
+    }
     CUDA_CHECK(cuMemFree(d_x));
     CUDA_CHECK(cuMemFree(d_y));
     CUDA_CHECK(cuModuleUnload(mod_a));
     CUDA_CHECK(cuModuleUnload(mod_b));
+    if (mod_c) CUDA_CHECK(cuModuleUnload(mod_c));
     std::cout << "\n";
     return true;
 }
@@ -483,13 +578,15 @@ int main(int argc, char** argv) {
     std::string saxpy_cuda_path;
     std::string compute_miniptx_path;
     std::string compute_cuda_path;
+    std::string compute_nofma_path;
 
     if (argc == 2) {
         build_dir = argv[1];
-        saxpy_miniptx_path = build_dir + "/miniptx_saxpy.ptx";
-        saxpy_cuda_path    = build_dir + "/cuda_saxpy.ptx";
+        saxpy_miniptx_path   = build_dir + "/miniptx_saxpy.ptx";
+        saxpy_cuda_path      = build_dir + "/cuda_saxpy.ptx";
         compute_miniptx_path = build_dir + "/miniptx_compute_heavy.ptx";
         compute_cuda_path    = build_dir + "/cuda_compute_heavy.ptx";
+        compute_nofma_path   = build_dir + "/cuda_compute_heavy_nofma.ptx";
     } else if (argc >= 3) {
         saxpy_miniptx_path = argv[1];
         saxpy_cuda_path    = argv[2];
@@ -497,11 +594,15 @@ int main(int argc, char** argv) {
             compute_miniptx_path = argv[3];
             compute_cuda_path    = argv[4];
         }
+        if (argc >= 6) {
+            compute_nofma_path   = argv[5];
+        }
     } else {
-        saxpy_miniptx_path = build_dir + "/miniptx_saxpy.ptx";
-        saxpy_cuda_path    = build_dir + "/cuda_saxpy.ptx";
+        saxpy_miniptx_path   = build_dir + "/miniptx_saxpy.ptx";
+        saxpy_cuda_path      = build_dir + "/cuda_saxpy.ptx";
         compute_miniptx_path = build_dir + "/miniptx_compute_heavy.ptx";
         compute_cuda_path    = build_dir + "/cuda_compute_heavy.ptx";
+        compute_nofma_path   = build_dir + "/cuda_compute_heavy_nofma.ptx";
     }
 
     std::cout << "=================================================================\n";
@@ -543,8 +644,9 @@ int main(int argc, char** argv) {
     if (!compute_miniptx_path.empty() && !compute_cuda_path.empty()) {
         std::string compute_miniptx = read_file(compute_miniptx_path);
         std::string compute_cuda    = read_file(compute_cuda_path);
+        std::string compute_nofma   = compute_nofma_path.empty() ? "" : read_file(compute_nofma_path, false);
         if (!compute_miniptx.empty() && !compute_cuda.empty()) {
-            if (!run_compute_benchmark(compute_miniptx, compute_cuda)) {
+            if (!run_compute_benchmark(compute_miniptx, compute_cuda, compute_nofma)) {
                 std::cerr << "Compute-heavy benchmark encountered an error.\n";
                 cuCtxDestroy(context);
                 return 1;
@@ -554,7 +656,7 @@ int main(int argc, char** argv) {
 
     std::cout << "Environment & Methodology Notes:\n";
     std::cout << "  - Measurements taken on a shared DGX system (" << dev_name << ").\n";
-    std::cout << "  - Alternating A/B testing eliminates dynamic thermal/clock scaling bias.\n";
+    std::cout << "  - Alternating A/B/C testing eliminates dynamic thermal/clock scaling bias.\n";
     std::cout << "  - Pure CUDA Driver API (cuEventElapsedTime) timing strictly isolates GPU kernel execution.\n";
 
     CUDA_CHECK_MAIN(cuCtxDestroy(context));

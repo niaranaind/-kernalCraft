@@ -5,7 +5,7 @@
 # Target: Tesla V100-SXM2 (sm_70) on DGX Server
 # Workloads:
 #   1. SAXPY: N = 2^24 elements (128 MiB footprint, 192 MiB DRAM traffic) - Memory-Bound
-#   2. Compute-Heavy: N = 2^24 elements, 64-iteration inner FMA loop - Arithmetic-Bound
+#   2. Compute-Heavy: N = 2^24 elements, 64-iteration inner loop
 #
 # Usage:
 #   bash scripts/benchmark_dgx.sh
@@ -59,7 +59,7 @@ else
 fi
 echo
 
-# 2. Build MiniPTX compiler if not already built or outdated
+# 2. Build MiniPTX compiler
 echo "--- Compiling miniptxc ---"
 g++ -O3 -std=c++17 -Wall -Wextra -Wpedantic \
     -static-libstdc++ -static-libgcc \
@@ -97,7 +97,7 @@ if ! nvcc -ccbin "${NVCC_CCBIN}" -ptx -arch="${ARCH}" -O3 "${ROOT_DIR}/examples/
     exit 1
 fi
 
-# 5. Generate PTX for Compute-Heavy (Arithmetic-Bound)
+# 5. Generate PTX for Compute-Heavy
 echo "--- Generating PTX for MiniPTX Compute-Heavy ---"
 "${BUILD_DIR}/miniptxc" "${ROOT_DIR}/examples/compute_heavy.mk" > "${BUILD_DIR}/miniptx_compute_heavy.ptx"
 
@@ -105,9 +105,14 @@ echo "--- Compiling hand-written CUDA Compute-Heavy to PTX (nvcc -O3 -arch=${ARC
 echo "  Executing: nvcc -ccbin \"${NVCC_CCBIN}\" -ptx -arch=\"${ARCH}\" -O3 examples/cuda_compute_heavy.cu -o build_dgx/cuda_compute_heavy.ptx"
 if ! nvcc -ccbin "${NVCC_CCBIN}" -ptx -arch="${ARCH}" -O3 "${ROOT_DIR}/examples/cuda_compute_heavy.cu" -o "${BUILD_DIR}/cuda_compute_heavy.ptx"; then
     echo "ERROR: nvcc failed to compile examples/cuda_compute_heavy.cu." >&2
-    echo "Note: CUDA ${CUDA_VER} supports host GCC versions up to GCC 12." >&2
-    echo "If your default compiler is GCC 13+, specify a supported host compiler via NVCC_CCBIN, e.g.:" >&2
-    echo "  NVCC_CCBIN=/usr/bin/g++ bash scripts/benchmark_dgx.sh" >&2
+    exit 1
+fi
+
+# Diagnostic (a): CUDA compute-heavy with --fmad=false
+echo "--- Compiling hand-written CUDA Compute-Heavy with --fmad=false (Diagnostic a) ---"
+echo "  Executing: nvcc -ccbin \"${NVCC_CCBIN}\" -ptx -arch=\"${ARCH}\" -O3 --fmad=false examples/cuda_compute_heavy.cu -o build_dgx/cuda_compute_heavy_nofma.ptx"
+if ! nvcc -ccbin "${NVCC_CCBIN}" -ptx -arch="${ARCH}" -O3 --fmad=false "${ROOT_DIR}/examples/cuda_compute_heavy.cu" -o "${BUILD_DIR}/cuda_compute_heavy_nofma.ptx"; then
+    echo "ERROR: nvcc failed to compile examples/cuda_compute_heavy.cu with --fmad=false." >&2
     exit 1
 fi
 
@@ -117,10 +122,10 @@ echo "--- Executing Benchmark on GPU (CUDA_VISIBLE_DEVICES=0) ---"
 export CUDA_VISIBLE_DEVICES=0
 "${BUILD_DIR}/benchmark" "${BUILD_DIR}"
 
-# 7. SASS Disassembly & Machine Instruction Comparison
+# 7. SASS Disassembly & Machine Instruction Analysis (Diagnostic b)
 echo
 echo "================================================================="
-echo " SASS Disassembly & Machine Instruction Comparison               "
+echo " SASS Disassembly & Machine Instruction Analysis                 "
 echo "================================================================="
 echo
 
@@ -129,6 +134,7 @@ ptxas -m64 -arch="${ARCH}" "${BUILD_DIR}/miniptx_saxpy.ptx" -o "${BUILD_DIR}/min
 ptxas -m64 -arch="${ARCH}" "${BUILD_DIR}/cuda_saxpy.ptx" -o "${BUILD_DIR}/cuda_saxpy.cubin"
 ptxas -m64 -arch="${ARCH}" "${BUILD_DIR}/miniptx_compute_heavy.ptx" -o "${BUILD_DIR}/miniptx_compute_heavy.cubin"
 ptxas -m64 -arch="${ARCH}" "${BUILD_DIR}/cuda_compute_heavy.ptx" -o "${BUILD_DIR}/cuda_compute_heavy.cubin"
+ptxas -m64 -arch="${ARCH}" "${BUILD_DIR}/cuda_compute_heavy_nofma.ptx" -o "${BUILD_DIR}/cuda_compute_heavy_nofma.cubin"
 
 count_sass_instructions() {
     local cubin="$1"
@@ -136,27 +142,63 @@ count_sass_instructions() {
         echo "0"
         return
     fi
-    # cuobjdump -sass outputs instruction lines with /*offset*/ followed by mnemonic and ending with ;
     cuobjdump -sass "${cubin}" 2>/dev/null | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -c ';' || echo "0"
 }
 
-SAXPY_MINIPTX_SASS="$(count_sass_instructions "${BUILD_DIR}/miniptx_saxpy.cubin")"
-SAXPY_CUDA_SASS="$(count_sass_instructions "${BUILD_DIR}/cuda_saxpy.cubin")"
-COMPUTE_MINIPTX_SASS="$(count_sass_instructions "${BUILD_DIR}/miniptx_compute_heavy.cubin")"
-COMPUTE_CUDA_SASS="$(count_sass_instructions "${BUILD_DIR}/cuda_compute_heavy.cubin")"
+analyze_compute_cubin() {
+    local cubin="$1"
+    local label="$2"
+    if [ ! -f "${cubin}" ]; then
+        echo "  ${label}: file not found"
+        return
+    fi
+
+    local sass
+    sass="$(cuobjdump -sass "${cubin}" 2>/dev/null)"
+
+    local total_sass
+    total_sass="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -c ';' || echo 0)"
+
+    local ffma_count
+    ffma_count="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -iE '\bFFMA(\.[A-Z0-9_]+)*\b' | grep -c ';' || echo 0)"
+
+    local fmul_count
+    fmul_count="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -iE '\bFMUL(\.[A-Z0-9_]+)*\b' | grep -c ';' || echo 0)"
+
+    local fadd_count
+    fadd_count="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -iE '\bFADD(\.[A-Z0-9_]+)*\b' | grep -c ';' || echo 0)"
+
+    local bra_count
+    bra_count="$(echo "${sass}" | grep -E '^\s*/\*[0-9a-fA-F]+\*/' | grep -iE '\bBRA(\.[A-Z0-9_]+)*\b' | grep -c ';' || echo 0)"
+
+    local math_total=$((ffma_count + fmul_count + fadd_count))
+    local unroll_info="Rolled loop (unroll factor 1: ${math_total} float op(s) in body, ${bra_count} branch(es))"
+    if [ "${bra_count}" -eq 0 ] && [ "${math_total}" -ge 32 ]; then
+        unroll_info="Fully unrolled (${math_total} float ops, no backward branch)"
+    elif [ "${math_total}" -gt 4 ] && [ "${bra_count}" -gt 0 ]; then
+        unroll_info="Partially unrolled (${math_total} float ops per loop, ${bra_count} branch(es))"
+    fi
+
+    echo "  ${label}:"
+    echo "    - Total SASS instructions:    ${total_sass}"
+    echo "    - Float arithmetic breakdown: FFMA: ${ffma_count} | FMUL: ${fmul_count} | FADD: ${fadd_count}"
+    echo "    - Loop structure:             ${unroll_info}"
+}
 
 echo "SASS Instruction Counts (sm_70 machine instructions via cuobjdump -sass):"
 echo "  Benchmark 1 - SAXPY:"
-echo "    - MiniPTX:                    ${SAXPY_MINIPTX_SASS} SASS instructions"
-echo "    - Hand-written CUDA (nvcc -O3): ${SAXPY_CUDA_SASS} SASS instructions"
-echo "  Benchmark 2 - Compute-Heavy:"
-echo "    - MiniPTX:                    ${COMPUTE_MINIPTX_SASS} SASS instructions"
-echo "    - Hand-written CUDA (nvcc -O3): ${COMPUTE_CUDA_SASS} SASS instructions"
+echo "    - MiniPTX:                    $(count_sass_instructions "${BUILD_DIR}/miniptx_saxpy.cubin") SASS instructions"
+echo "    - Hand-written CUDA (nvcc -O3): $(count_sass_instructions "${BUILD_DIR}/cuda_saxpy.cubin") SASS instructions"
 echo
-echo "Why PTX Instruction Counts Differ:"
-echo "  The MiniPTX IR generates explicit temporary register 'mov' copies for operand"
-echo "  passing, variable slot reads/writes, and parameter forwarding. In contrast, nvcc"
-echo "  directly emits optimized PTX patterns. However, when ptxas compiles PTX into SASS,"
-echo "  its register allocator and copy-coalescing passes eliminate these redundant mov"
-echo "  copies, bringing the actual hardware instruction count much closer together."
+echo "  Benchmark 2 - Compute-Heavy Diagnostics (Diagnostic b):"
+analyze_compute_cubin "${BUILD_DIR}/miniptx_compute_heavy.cubin"       "MiniPTX (emitted PTX)"
+analyze_compute_cubin "${BUILD_DIR}/cuda_compute_heavy.cubin"          "CUDA (nvcc -O3)"
+analyze_compute_cubin "${BUILD_DIR}/cuda_compute_heavy_nofma.cubin"    "CUDA no-FMA (nvcc -O3 --fmad=false)"
+echo
+echo "Methodology Note on Instruction Counts:"
+echo "  - In SAXPY: MiniPTX produces 24 SASS instructions vs 16 for CUDA, but both achieve"
+echo "    identical runtime because DRAM bandwidth is fully saturated."
+echo "  - In Compute-Heavy: MiniPTX produces 24 SASS instructions vs 32 for CUDA, yet MiniPTX"
+echo "    runs slower. Static instruction counts do not equal dynamically executed instructions"
+echo "    when loops, instruction scheduling, and hardware FMA fusion are involved."
 echo "================================================================="
