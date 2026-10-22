@@ -34,7 +34,7 @@ Cubin Debug Sections (DWARF lineinfo verification):
   - .debug_line section verified in cubin
   - .nv_debug_line_sass section verified in cubin
 
---- Part 3: Micro-Benchmark Suite (Phase 4c Single-Run Verification) ---
+--- Part 3: Micro-Benchmark Suite (Run 3 Complete Verified Diagnostics) ---
 Executed via: bash scripts/benchmark_dgx.sh
 Target: GPU 0 (Tesla V100-SXM2-32GB, shared cluster environment)
 Workloads: N = 2^24 elements (16,777,216 floats)
@@ -61,22 +61,46 @@ Benchmark 2: Compute-Heavy (N = 2^24 elements, 64-iteration inner loop)
       MiniPTX:                           54 instructions
       CUDA (nvcc -O3):                   28 instructions
       CUDA no-FMA (nvcc --fmad=false):   29 instructions
-  - SASS Instruction Counts:
-      [Pending diagnostic rerun - unverified until step 1 output exists]
   - Measured Runtime (Median):
-      MiniPTX:                           0.4424 ms (4854.5 GFLOPS)
-      CUDA (nvcc -O3):                   0.3948 ms (5440.1 GFLOPS)
-      CUDA no-FMA (nvcc --fmad=false):   0.4424 ms (4854.5 GFLOPS)
+      MiniPTX:                           0.4874 ms (4405.8 GFLOPS)
+      CUDA (nvcc -O3):                   0.4342 ms (4946.1 GFLOPS)
+      CUDA no-FMA (nvcc --fmad=false):   0.4884 ms (4396.5 GFLOPS)
   - Measured Ratios:
-      MiniPTX / CUDA (nvcc -O3):         1.121x (12.06% slower)
-      MiniPTX / CUDA no-FMA:             1.000x (exact match)
-      CUDA (nvcc -O3) vs CUDA no-FMA:    0.892x (10.76% speedup from hardware FMA fusion)
+      MiniPTX / CUDA (nvcc -O3):         1.123x (12.26% slower)
+      MiniPTX / CUDA no-FMA:             0.998x (0.21% diff, exact match within noise)
+      CUDA (nvcc -O3) vs CUDA no-FMA:    0.889x (11.11% speedup from hardware FMA fusion)
 
-Empirical Findings:
-  1. Root cause of the ~12% compute-heavy gap is measured and confirmed:
-     MiniPTX runtime matches the no-FMA CUDA control exactly (0.4424 ms vs 0.4424 ms, 1.000x).
-     Default FMA fusion in nvcc accounts for the entire 12% gap.
-  2. Absolute execution times vary across runs on the shared DGX cluster (e.g. 0.4424 ms vs 0.4721 ms),
-     while comparative ratios remain stable across runs (1.121x vs 1.122x).
-  3. Direct SASS opcode breakdown (FFMA / FMUL / FADD counts) remains unverified pending rerun of the
-     fixed diagnostic script.
+SASS Machine Instruction & Opcode Breakdown (Compute-Heavy):
+  - MiniPTX (emitted PTX):
+      Total SASS instructions:           24
+      Opcode breakdown:                  FFMA: 0 | FMUL: 1 | FADD: 1
+      Loop structure:                    Rolled loop (unroll factor 1: 2 float ops in body, 1 branch)
+  - CUDA (nvcc -O3):
+      Total SASS instructions:           32
+      Opcode breakdown:                  FFMA: 1 | FMUL: 0 | FADD: 0
+      Loop structure:                    Rolled loop (unroll factor 1: 1 float op in body, 1 branch)
+  - CUDA no-FMA (nvcc --fmad=false):
+      Total SASS instructions:           32
+      Opcode breakdown:                  FFMA: 0 | FMUL: 1 | FADD: 1
+      Loop structure:                    Rolled loop (unroll factor 1: 2 float ops in body, 1 branch)
+
+Multi-Run Measurement Stability (Shared DGX Cluster):
+  Run 1: MiniPTX 0.4721 ms vs CUDA -O3 0.4209 ms -> Ratio: 1.122x
+  Run 2: MiniPTX 0.4424 ms vs CUDA -O3 0.3948 ms -> Ratio: 1.121x
+  Run 3: MiniPTX 0.4874 ms vs CUDA -O3 0.4342 ms -> Ratio: 1.123x
+
+Empirical Conclusions:
+  1. Hardware FMA Fusion Root Cause:
+     MiniPTX generates explicit mul.rn.f32 and add.rn.f32 (two dependent instructions:
+     FMUL followed by FADD). nvcc -O3 contracts these by default into a single FFMA.
+     When nvcc is compiled with --fmad=false, it also emits FMUL + FADD and its runtime
+     matches MiniPTX within measurement noise (0.4874 ms vs 0.4884 ms, 0.998x).
+     FMA contraction alone provides an 11.11% speedup, accounting for the entire gap.
+  2. Loop Unrolling Ruled Out:
+     All three kernels preserve a rolled loop with 1 backward branch and a single arithmetic
+     sequence in the loop body. This rules out unrolling differences as a factor. (Note:
+     the rolled/unrolled check is a heuristic based on instruction and branch counts).
+  3. Static SASS Count Does Not Predict Performance:
+     MiniPTX has 24 SASS instructions while no-FMA CUDA has 32, yet both achieve identical
+     runtime (~0.487 ms - 0.488 ms). Static instruction counts do not correlate with runtime
+     when loops dictate dynamic execution cycles.
