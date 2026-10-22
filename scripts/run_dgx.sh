@@ -50,40 +50,30 @@ echo
 echo "--- Step 2: Building MiniPTX (Compiler & CUDA Driver Runtime) ---"
 mkdir -p "${BUILD_DIR}"
 
-BUILD_SUCCESS=0
-if cmake --version &>/dev/null; then
-    if cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release && \
-       cmake --build "${BUILD_DIR}" -j"$(nproc 2>/dev/null || echo 4)"; then
-        BUILD_SUCCESS=1
-    fi
-fi
+CUDA_BIN_DIR="$(dirname "$(which nvcc 2>/dev/null || echo "/usr/local/cuda/bin/nvcc")")"
+CUDA_DIR="$(dirname "${CUDA_BIN_DIR}")"
+echo "  Detected CUDA directory: ${CUDA_DIR}"
 
-if [ "${BUILD_SUCCESS}" -eq 0 ]; then
-    echo "  (CMake unavailable or permission denied; building directly with g++)"
-    CUDA_BIN_DIR="$(dirname "$(which nvcc 2>/dev/null || echo "/usr/local/cuda/bin/nvcc")")"
-    CUDA_DIR="$(dirname "${CUDA_BIN_DIR}")"
-    echo "  Detected CUDA directory: ${CUDA_DIR}"
+echo "  Compiling miniptxc with g++..."
+g++ -O3 -std=c++17 -Wall -Wextra -Wpedantic \
+    -I"${ROOT_DIR}/include" \
+    "${ROOT_DIR}/src/lexer.cpp" \
+    "${ROOT_DIR}/src/parser.cpp" \
+    "${ROOT_DIR}/src/ast.cpp" \
+    "${ROOT_DIR}/src/ir.cpp" \
+    "${ROOT_DIR}/src/ptx_emitter.cpp" \
+    "${ROOT_DIR}/src/main.cpp" \
+    -o "${BUILD_DIR}/miniptxc"
 
-    echo "  Compiling miniptxc..."
-    g++ -O3 -std=c++17 -Wall -Wextra -Wpedantic \
-        -I"${ROOT_DIR}/include" \
-        "${ROOT_DIR}/src/lexer.cpp" \
-        "${ROOT_DIR}/src/parser.cpp" \
-        "${ROOT_DIR}/src/ast.cpp" \
-        "${ROOT_DIR}/src/ir.cpp" \
-        "${ROOT_DIR}/src/ptx_emitter.cpp" \
-        "${ROOT_DIR}/src/main.cpp" \
-        -o "${BUILD_DIR}/miniptxc"
+echo "  Compiling run_ptx with g++..."
+g++ -O3 -std=c++17 -Wall -Wextra -Wpedantic \
+    -I"${ROOT_DIR}/include" \
+    -I"${CUDA_DIR}/include" \
+    "${ROOT_DIR}/runtime/run_ptx.cpp" \
+    -L"${CUDA_DIR}/lib64" -L"${CUDA_DIR}/lib64/stubs" -L/usr/lib/x86_64-linux-gnu \
+    -lcuda \
+    -o "${BUILD_DIR}/run_ptx"
 
-    echo "  Compiling run_ptx..."
-    g++ -O3 -std=c++17 -Wall -Wextra -Wpedantic \
-        -I"${ROOT_DIR}/include" \
-        -I"${CUDA_DIR}/include" \
-        "${ROOT_DIR}/runtime/run_ptx.cpp" \
-        -L"${CUDA_DIR}/lib64" -L"${CUDA_DIR}/lib64/stubs" -L/usr/lib/x86_64-linux-gnu \
-        -lcuda \
-        -o "${BUILD_DIR}/run_ptx"
-fi
 echo "Build complete."
 echo
 
